@@ -9,6 +9,10 @@ import { listAgents, listPending, revokeAgent, applyDecision } from './oauth.mjs
 import { pairingStatus } from './pairing.mjs';
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// Dual-arrows favicon (down filled + up outlined) — matches the extension icon.
+const FAVICON_SVG = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.7 2.4L3.7 9.2L1.8 9.2L5 13.6L8.2 9.2L6.3 9.2L6.3 2.4Z' fill='#3b82f6'/><path d='M9.7 13.6L9.7 6.8L7.8 6.8L11 2.4L14.2 6.8L12.3 6.8L12.3 13.6Z' fill='none' stroke='#3b82f6' stroke-width='1.4' stroke-linejoin='round'/></svg>";
+const FAVICON = 'data:image/svg+xml;base64,' + Buffer.from(FAVICON_SVG).toString('base64');
 const fmtBytes = (n) => { n = Number(n) || 0; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(0) + ' KB'; if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB'; return (n / 1073741824).toFixed(2) + ' GB'; };
 
 function readBody(req) {
@@ -40,6 +44,7 @@ export function uiChrome(title, body, active = '') {
   const modItems = moduleNav();
   const modSection = modItems.length ? `<div class="navh">Modules</div>${modItems.map(item).join('')}` : '';
   return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(title)} — AI Browser Bridge</title>
+<link rel="icon" href="${FAVICON}">
 <style>
 :root{--bg:#14161b;--card:#1e2128;--fg:#e6e8ec;--mut:#9aa1ac;--line:#2c3038;--ok:#2e9e44;--bad:#e5484d;--accent:#3b82f6;--warn:#d29922}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;min-height:100vh}
