@@ -66,19 +66,81 @@ navigate, control, and record a chosen set of tabs.
 5. Enable a module and set access. Open http://127.0.0.1:8787, go to Modules,
    enable Deep Research, then open it and choose which tabs agents may use.
 
-6. Connect your agent. For Claude Code:
+6. Connect your agent. See "Connecting an agent" below. In short: register
+   http://127.0.0.1:8787/mcp with your agent, authenticate, and approve the
+   request in the extension popup.
 
-   ```
-   claude mcp add --transport http ai-browser-bridge http://127.0.0.1:8787/mcp
-   ```
+Once connected, the agent has the browser tools (browser_navigate, browser_eval,
+browser_read, browser_screenshot, and so on), limited to what your rules allow.
 
-   Then start the authorization from your agent (in Claude Code, run /mcp and
-   authenticate). Your browser opens a consent page, and a matching request
-   appears in the extension popup. Approve it in either place.
+## Connecting an agent
 
-That is it. The agent now has the browser tools (browser_navigate,
-browser_eval, browser_read, browser_screenshot, and so on), limited to what
-your rules allow.
+The bridge is a standard remote MCP server that is also its own OAuth
+authorization server, so any MCP client that supports remote HTTP servers can
+connect. The flow is always the same three steps:
+
+1. Register the server URL with your agent: http://127.0.0.1:8787/mcp
+2. Authenticate. The agent opens your browser for a one-time consent.
+3. Approve. A request appears in the extension popup (and on the consent page).
+   Click Approve. The grant is permanent and revocable from the popup or Config.
+
+Because the bridge is loopback only, the agent must run on the same machine you
+are on. A cloud-hosted agent (for example the claude.ai website) cannot reach
+127.0.0.1 without a public tunnel and is not recommended.
+
+Also remember that connecting an agent and linking the browser are two separate
+things. Authenticating lets the agent reach the bridge; clicking Link in the
+extension is what lets the bridge drive your browser. If you skip the link,
+calls fail with a signature error.
+
+### Claude Code (recommended for a local bridge)
+
+Register it once, then authenticate:
+
+    claude mcp add --transport http ai-browser-bridge http://127.0.0.1:8787/mcp
+
+Then run /mcp in an interactive session, select ai-browser-bridge, and choose
+Authenticate. If instead you keep the server in a project .mcp.json file, Claude
+Code asks you to approve the project's servers on startup before it appears in
+/mcp; if that prompt never showed, register it with the command above or run
+claude mcp reset-project-choices and restart.
+
+### Claude Desktop
+
+Do not use Settings > Connectors > Add custom connector for a local bridge. That
+path fetches the server from Anthropic's cloud, which cannot reach 127.0.0.1,
+and it rejects plain http URLs. Instead run the bridge through the mcp-remote
+shim, which runs locally and handles the browser OAuth for you. Edit
+~/Library/Application Support/Claude/claude_desktop_config.json:
+
+    {
+      "mcpServers": {
+        "ai-browser-bridge": {
+          "command": "npx",
+          "args": ["mcp-remote", "http://127.0.0.1:8787/mcp", "--transport", "http-only"]
+        }
+      }
+    }
+
+Quit and reopen Claude Desktop. mcp-remote opens your browser for consent, and
+the approval appears in the extension popup.
+
+### OpenCode and other agents
+
+Any MCP client that supports remote (HTTP) servers with OAuth can connect. Add a
+remote MCP server pointing at http://127.0.0.1:8787/mcp and complete the browser
+consent.
+
+### How to find the right method for your agent
+
+Every agent registers MCP servers its own way. To find yours, search that
+agent's documentation or settings for one of these terms: MCP, MCP server,
+remote MCP, connectors, or tools. You want the option to add a remote or HTTP
+MCP server by URL, not a local command or stdio server. Point it at
+http://127.0.0.1:8787/mcp. The server advertises its OAuth endpoints at
+http://127.0.0.1:8787/.well-known/oauth-protected-resource, so a spec-compliant
+client discovers the login flow automatically. If your agent runs in the cloud
+rather than on your machine, it cannot reach a loopback address without a tunnel.
 
 ## Managing it
 
