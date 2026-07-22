@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root{
+    --bg:#16181d; --card:#1e2128; --fg:#e6e8ec; --mut:#9aa1ac; --line:#2c3038;
+    --btn:#2a2f38; --btnH:#333a45; --inp:#12141a;
+    --ok:#2e9e44; --bad:#e5484d; --warn:#d29922; --accent:#3b82f6;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f5f6f8; --card:#ffffff; --fg:#1b1e24; --mut:#5b626d; --line:#e2e5ea;
+      --btn:#eef0f3; --btnH:#e3e6eb; --inp:#ffffff;
+      --ok:#1a7f37; --bad:#d1242f; --warn:#9a6700; --accent:#2563eb;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{width:320px;background:var(--bg);color:var(--fg);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:10px;}
+  h1{font-size:14px;margin:0;display:flex;align-items:center;gap:6px}
+  .muted{color:var(--mut)}
+  .section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px}
+  .row{display:flex;align-items:center;gap:8px;margin:4px 0}
+  .grow{flex:1;min-width:0}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)}
+  .label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin-bottom:4px}
+  button{background:var(--btn);color:var(--fg);border:1px solid var(--line);border-radius:7px;
+    padding:5px 9px;font-size:12px;cursor:pointer}
+  button:hover{background:var(--btnH)} button:disabled{opacity:.5;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  input[type=text]{background:var(--inp);color:var(--fg);border:1px solid var(--line);
+    border-radius:7px;padding:6px 8px;font-size:12px;width:100%}
+  #pwCode{font-family:ui-monospace,Menlo,monospace;letter-spacing:.5px}
+  button.gbtn{width:30px;height:30px;padding:0;font-size:17px;line-height:1;flex:none;
+    display:flex;align-items:center;justify-content:center}
+  button.gbtn.arrow{color:var(--accent)}
+  .agent{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
+  .agent .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent .pend{color:var(--warn)}
+  .agent button{font-size:11px;padding:3px 8px}
+  .agent button.ok{background:var(--ok);border-color:var(--ok);color:#fff}
+  .agent button.no{background:var(--bad);border-color:var(--bad);color:#fff}
+  .modrow{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
+  .modrow .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+  <h1><span id="runDot" class="dot warn"></span> AI Browser Bridge
+    <span id="version" class="muted" style="font-size:11px;font-weight:normal"></span></h1>
+
+  <!-- Bridge status + link -->
+  <div class="section">
+    <div class="row"><span id="wsDot" class="dot warn"></span>
+      <span id="wsText" class="grow">Bridge…</span>
+      <button id="openDash" class="gbtn arrow" title="Open the bridge" disabled>↗</button></div>
+    <div class="row" style="margin-top:6px">
+      <span id="bridgeMeta" class="grow muted" style="font-size:11px">Local bridge</span>
+      <button id="linkBtn" title="Pair this browser with the bridge">Link</button>
+    </div>
+  </div>
+
+  <!-- Authorized agents -->
+  <div class="section hidden" id="agentsSection">
+    <div class="label">Authorized agents</div>
+    <div id="agentList"></div>
+  </div>
+
+  <!-- Modules that registered a UI, each opening its bridge page -->
+  <div class="section hidden" id="navSection">
+    <div class="label">Modules</div>
+    <div id="navLinks"></div>
+  </div>
+
+  <!-- Legacy access code — only until this browser is paired -->
+  <div class="section" id="pwSection">
+    <div class="label">Access code <span class="muted">(legacy — Link to replace)</span></div>
+    <div class="row">
+      <input id="pwCode" type="text" readonly value="" />
+      <button id="copyPw" class="primary">Copy</button>
+      <button id="regenPw" class="gbtn" title="Generate a new code">↻</button>
+    </div>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

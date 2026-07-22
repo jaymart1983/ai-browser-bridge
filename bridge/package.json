@@ -1,0 +1,21 @@
+{
+  "name": "ai-browser-bridge",
+  "version": "0.1.0",
+  "description": "Local bridge that relays commands from AI/CLI tools to the AI Browser Bridge extension over a loopback WebSocket.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "ai-browser-bridge": "./cli.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "cli": "node cli.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "systray2": "^2.1.4",
+    "ws": "^8.18.0"
+  }
+}

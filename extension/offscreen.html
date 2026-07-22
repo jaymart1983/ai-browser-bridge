@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>AI Browser Bridge — offscreen</title>
+  </head>
+  <body>
+    <!--
+      This hidden offscreen document exists solely to host a long-lived
+      WebSocket to the local bridge. MV3 service workers are ephemeral and
+      cannot keep a socket open reliably; an offscreen document can. It relays
+      messages between the WebSocket and the service worker via runtime
+      messaging. No UI here.
+    -->
+    <script type="module" src="offscreen.js"></script>
+  </body>
+</html>

@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>AI Browser Bridge — Live Activity</title>
+<style>
+  :root{--bg:#14161b;--card:#1e2128;--fg:#e6e8ec;--mut:#9aa1ac;--line:#2c3038;--ok:#2e9e44;--bad:#e5484d;--accent:#3b82f6;--warn:#d29922}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;height:100vh;display:flex;flex-direction:column}
+  header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  header h1{font-size:15px;margin:0}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+  .wrap{flex:1;display:flex;min-height:0}
+  .sessions{width:230px;border-right:1px solid var(--line);overflow-y:auto;flex:none}
+  .sess{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+  .sess:hover{background:#20242c} .sess.sel{background:#252b34;border-left:3px solid var(--accent)}
+  .sess .k{font-size:12px;display:flex;align-items:center}
+  .sess .m{font-size:11px;color:var(--mut);margin-top:2px}
+  .tag{font-size:10px;padding:1px 5px;border-radius:4px;margin-left:5px}
+  .tag.tmp{background:#33383f;color:#c3c9d2} .tag.perm{background:#1c3a5e;color:#8fc0ff}
+  .actions{margin-top:5px;display:flex;gap:6px}
+  .actions button{font-size:10px;background:#2a2f38;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:2px 7px;cursor:pointer}
+  .actions button:hover{background:#333a45}
+  .actions button.del:hover{background:#5a2327;border-color:var(--bad)}
+  .feed{flex:1;overflow-y:auto;padding:12px 16px}
+  .ev{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+  .ev .ico{flex:none;width:20px;text-align:center}
+  .ev .body{flex:1;min-width:0}
+  .ev .u{word-break:break-all;font-size:13px}
+  .ev .t{font-size:11px;color:var(--mut)}
+  .badges{margin-top:3px;display:flex;flex-wrap:wrap;gap:5px}
+  .badge{font-size:11px;background:#243244;color:#9cc4ff;border-radius:5px;padding:1px 6px}
+  .badge.warn{background:#3a2f18;color:#e9c069}
+  img.shot{max-width:280px;border:1px solid var(--line);border-radius:6px;margin-top:4px;display:block}
+  .muted{color:var(--mut)} .status{font-size:12px;color:var(--mut)}
+  .empty{color:var(--mut);padding:30px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <span id="dot" class="dot bad"></span>
+  <h1>AI Browser Bridge — Live Activity</h1>
+  <span id="conn" class="status">connecting…</span>
+  <span style="flex:1"></span>
+  <span id="usage" class="status"></span>
+</header>
+<div class="wrap">
+  <div class="sessions" id="sessions"></div>
+  <div class="feed" id="feed"><div class="empty">Pick a session on the left. Start one by clicking <b>Record</b> on a tab in the extension.</div></div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let selected = null;
+let seen = 0;
+
+async function jget(url){ const r = await fetch(url); return r.json(); }
+
+function fmtTime(ts){ try{ return new Date(ts).toLocaleTimeString(); }catch{ return ''; } }
+
+async function pollSessions(){
+  let data;
+  try { data = await jget('/monitor/sessions'); } catch { $('conn').textContent='node offline'; $('dot').className='dot bad'; return; }
+  $('dot').className = 'dot ' + (data.agentConnected ? 'ok':'bad');
+  $('conn').textContent = data.agentConnected ? 'extension connected' : 'extension NOT connected';
+  const u = data.usage || {tmp:0,perm:0};
+  $('usage').textContent = `Tmp ${fmtBytes(u.tmp)} · Perm ${fmtBytes(u.perm)}`;
+  const box = $('sessions');
+  const sessions = data.sessions || [];
+  if (!selected && sessions.length) selectSession(sessions[0].id);
+  box.innerHTML = '';
+  for (const s of sessions){
+    const d = document.createElement('div');
+    d.className = 'sess' + (s.id===selected?' sel':'');
+    // Header: favicon + tab title (falls back to hostname, then "tab N") + storage tag.
+    const k = document.createElement('div'); k.className = 'k';
+    if (s.active) k.appendChild(document.createTextNode('🔴 '));
+    if (s.favIconUrl){
+      const im = document.createElement('img');
+      im.src = s.favIconUrl; im.onerror = () => { im.style.visibility='hidden'; };
+      im.style.cssText = 'width:14px;height:14px;border-radius:3px;vertical-align:middle;margin-right:5px';
+      k.appendChild(im);
+    }
+    const t = document.createElement('span'); t.className='grow';
+    let label = s.title;
+    if (!label && s.url){ try { label = new URL(s.url).hostname; } catch {} }
+    t.textContent = label || ('tab ' + (s.tabId ?? '?'));
+    t.style.cssText='overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1';
+    k.appendChild(t);
+    const tag = document.createElement('span'); tag.className='tag '+(s.root==='perm'?'perm':'tmp');
+    tag.textContent = s.root==='perm'?'PERM':'TMP'; k.appendChild(tag);
+
+    const m = document.createElement('div'); m.className = 'm';
+    m.innerHTML = `${s.count||0} events · ${fmtBytes(s.bytes)} · ${s.active?'recording':'stopped'}<br>${fmtTime(s.startedAt)}`;
+
+    // Actions: move to the other root + delete.
+    const acts = document.createElement('div'); acts.className='actions';
+    const other = s.root==='perm'?'tmp':'perm';
+    const mv = document.createElement('button');
+    mv.textContent = 'Move → '+(other==='perm'?'Perm':'Tmp');
+    mv.onclick = (e) => { e.stopPropagation(); moveSession(s.name, s.root, other); };
+    const del = document.createElement('button'); del.className='del'; del.textContent='Delete';
+    del.onclick = (e) => { e.stopPropagation(); deleteSession(s.name, s.root); };
+    acts.append(mv, del);
+
+    d.append(k, m, acts);
+    d.onclick = () => selectSession(s.id);
+    box.appendChild(d);
+  }
+}
+
+function fmtBytes(n){ n=Number(n)||0; if(n<1024)return n+' B'; if(n<1048576)return (n/1024).toFixed(0)+' KB'; if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function parseSel(){ if(!selected) return null; const i=selected.indexOf(':'); return { root: selected.slice(0,i), name: selected.slice(i+1) }; }
+
+async function moveSession(name, from, to){
+  await fetch('/monitor/move',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,from,to})});
+  if (selected === from+':'+name) selected = null; // its id changed / moved
+  pollSessions();
+}
+async function deleteSession(name, root){
+  if (!confirm('Delete this recording? This cannot be undone.')) return;
+  await fetch('/monitor/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,root})});
+  if (selected === root+':'+name){ selected=null; $('feed').innerHTML=''; }
+  pollSessions();
+}
+
+function selectSession(key){
+  if (selected===key) return;
+  selected = key; seen = 0;
+  $('feed').innerHTML = '';
+  document.querySelectorAll('.sess').forEach(e=>e.classList.remove('sel'));
+  pollEvents();
+}
+
+function shotNum(file){ const m=/(\d+)\.(?:jpg|png)$/.exec(file||''); return m?m[1]:null; }
+
+function extractBadges(ev){
+  const out=[];
+  if (ev.kind==='network' && ev.body){
+    try{
+      const j = JSON.parse(ev.body);
+      const flat = JSON.stringify(j);
+      const vin = (flat.match(/"(?:vin|vehicleIdentificationNumber)"\s*:\s*"([A-HJ-NPR-Z0-9]{11,17})"/i)||[])[1];
+      const price = (flat.match(/"(?:price|purchase_now_price|bid_amount|list_price)"\s*:\s*"?\$?([\d,]{3,})/i)||[])[1];
+      const year = (flat.match(/"year"\s*:\s*"?((?:19|20)\d\d)/i)||[])[1];
+      const odo = (flat.match(/"(?:odometer|mileage)"\s*:\s*"?([\d,]{3,})/i)||[])[1];
+      if (vin) out.push(['VIN '+vin,false]);
+      if (year) out.push(['Year '+year,false]);
+      if (price) out.push(['$'+price,false]);
+      if (odo) out.push([odo+' mi',false]);
+    }catch{}
+  }
+  if (ev.status && ev.status>=400) out.push(['HTTP '+ev.status,true]);
+  return out;
+}
+
+async function pollEvents(){
+  const sel = parseSel();
+  if (!sel) return;
+  let data;
+  try { data = await jget('/monitor/events?key='+encodeURIComponent(sel.name)+'&root='+encodeURIComponent(sel.root)+'&since='+seen); } catch { return; }
+  const feed = $('feed');
+  for (const ev of (data.events||[])){
+    const row = document.createElement('div');
+    row.className='ev';
+    let ico='•', main='', extra='';
+    if (ev.kind==='navigation'){ ico='🧭'; main=ev.url||''; }
+    else if (ev.kind==='network'){ ico='🌐'; main=(ev.status?ev.status+' ':'')+(ev.url||''); }
+    else if (ev.kind==='screenshot'){ ico='🖼'; main=ev.url||'(screenshot)'; const n=shotNum(ev.file); if(n){ const sel=parseSel(); extra=`<img class="shot" loading="lazy" src="/monitor/shot?key=${encodeURIComponent(sel.name)}&root=${encodeURIComponent(sel.root)}&n=${n}">`; } }
+    else if (ev.kind==='session'){ ico='⚑'; main='session '+(ev.event||''); }
+    const badges = extractBadges(ev).map(([t,w])=>`<span class="badge ${w?'warn':''}">${t}</span>`).join('');
+    row.innerHTML = `<div class="ico">${ico}</div><div class="body">
+      <div class="u">${escapeHtml(main)}</div>
+      <div class="t">${fmtTime(ev.ts)} · ${ev.kind}</div>
+      ${badges?`<div class="badges">${badges}</div>`:''}${extra}</div>`;
+    feed.appendChild(row);
+  }
+  if (data.total!=null) seen = data.total;
+  // keep newest in view if near the bottom
+  if (feed.scrollHeight - feed.scrollTop - feed.clientHeight < 200) feed.scrollTop = feed.scrollHeight;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+pollSessions(); setInterval(pollSessions, 2000);
+setInterval(pollEvents, 1500);
+</script>
+</body>
+</html>
