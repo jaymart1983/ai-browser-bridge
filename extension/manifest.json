@@ -6,6 +6,7 @@
   "permissions": [
     "tabs",
     "scripting",
+    "userScripts",
     "storage",
     "alarms",
     "offscreen",

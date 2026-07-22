@@ -271,11 +271,9 @@ function handleCommandRequest(req, res) {
       method: parsed.method,
       params: parsed.params || {},
     };
-    // Forward the bearer access code, sent either as `token` (preferred) or
-    // `password`. The bridge is a dumb relay; the extension verifies the code.
-    if (typeof parsed.token === 'string') frame.token = parsed.token;
-    if (typeof parsed.password === 'string') frame.password = parsed.password;
-    signFrame(frame); // add the pairing signature when paired
+    // Auth is the pairing signature only (no bearer access code). Sign the frame
+    // with the shared pairing key; the extension verifies it before executing.
+    signFrame(frame);
 
     try {
       const reply = await relayToAgent(frame);

@@ -1,9 +1,10 @@
 // background.js — MV3 service worker (ES module).
 //
 // RESPONSIBILITIES
-//   * Owns ALL authentication + authorization state: the PBKDF2 password record
-//     lives in chrome.storage.local; the session token + unlock rate-limiting
-//     live in memory (token) and storage (rate-limit counters).
+//   * Trust anchor with the bridge is the "Link" pairing: an ECDH handshake
+//     derives a shared HMAC key (chrome.storage.local); the bridge signs every
+//     relayed command and we verify that signature. There is NO access code.
+//     Agents authenticate to the bridge over OAuth; the bridge relays to us.
 //   * Ensures a single offscreen document exists to host the persistent
 //     WebSocket to the local bridge (service workers cannot hold a long-lived
 //     socket reliably — they are torn down after ~30s idle).
@@ -22,21 +23,14 @@
 //   chrome.runtime messaging. The alarm-based keepalive resurrects both after
 //   the SW is killed.
 
-import {
-  hashPassword,
-  verifyPassword,
-  validatePasswordPolicy,
-  generatePassword,
-} from './crypto.js';
-
 const VERSION = '0.1.0';
 const DEFAULT_BRIDGE_URL = 'ws://127.0.0.1:8787/agent';
 
-// Session token sliding-expiry window: 15 minutes of inactivity.
-// Auth model: the auto-generated access code (K_PASSWORD_RECORD) IS the bearer
-// credential. Callers send it as `token` (or `password`) on EVERY request; it
-// stays valid until it rotates (K_ROTATE_DAYS, default 7) or the user resets it.
-// There is deliberately no session/unlock window — nothing to expire mid-use.
+// Auth model: pairing ONLY. The one-time "Link" ECDH handshake derives a shared
+// HMAC key; the bridge signs every relayed command frame with it and the
+// extension verifies that signature (verifyFrameMac) before executing. There is
+// NO access code / bearer password — agents authenticate to the bridge over
+// OAuth; the extension trusts the bridge solely via the Link pairing.
 
 // Keepalive alarm period. The spec asks for 25s; Chrome may clamp very short
 // alarm periods (historically to a 30s floor for unpacked extensions), which is
@@ -45,29 +39,14 @@ const DEFAULT_BRIDGE_URL = 'ws://127.0.0.1:8787/agent';
 const KEEPALIVE_ALARM = 'bridge-keepalive';
 const KEEPALIVE_PERIOD_MIN = 25 / 60;
 
-// Storage keys.
-const K_PASSWORD_RECORD = 'passwordRecord'; // {salt, iterations, hashB64}
-const K_RATE_LIMIT = 'unlockRateLimit'; // {failCount, lockoutUntil, lastAttempt}
-// Tab policy (allow/storage) used to live here; it is now bridge-owned (rule
-// engine). The extension keeps only pairing + the browser primitives.
+// Storage keys. Tab policy (allow/storage) is bridge-owned (rule engine); the
+// extension keeps only the pairing key + the browser primitives.
 const K_PAIR_KEY = 'pairKeyHex'; // ECDH-derived HMAC key (hex) shared with the bridge
 const K_BRIDGE_URL = 'bridgeUrl'; // string
-// The AUTO-GENERATED default password is kept in plaintext in local storage so
-// the popup can show + copy it any time (the user's explicit request — most of
-// the time they just copy it). This is a deliberate convenience tradeoff: the
-// threat model is "local machine trust" (anyone with your browser profile
-// already has your logged-in sessions). A password YOU set instead is stored
-// ONLY as a PBKDF2 hash and is never displayed.
-const K_DEFAULT_PLAINTEXT = 'defaultPasswordPlain'; // string | absent (custom pw set)
-const K_ROTATE_DAYS = 'rotateDays'; // number of days; 0 = never auto-rotate
-const K_LAST_ROTATED = 'lastRotatedAt'; // ms timestamp
-const DEFAULT_ROTATE_DAYS = 7;
 
 // Capabilities advertised by `status`.
 const CAPABILITIES = [
   'status',
-  'unlock',
-  'lock',
   'tabs.list',
   'tab.navigate',
   'tab.create',
@@ -75,6 +54,8 @@ const CAPABILITIES = [
   'tab.close',
   'page.read',
   'page.eval',
+  'page.fetch',
+  'page.exec',
   'page.screenshot',
   'monitor.start',
   'monitor.stop',
@@ -199,11 +180,6 @@ function updateIcon() {
   }
 }
 
-// Plaintext of the freshly generated default password is held ONLY in memory
-// and mirrored to chrome.storage.session (RAM-only, never written to disk) so
-// the popup can display it once. It is deleted as soon as the user acknowledges
-// it or changes the password. We never write it to chrome.storage.local.
-
 // ---------------------------------------------------------------------------
 // Small storage helpers
 // ---------------------------------------------------------------------------
@@ -220,29 +196,11 @@ async function getSession(key, dflt) {
 }
 
 // ---------------------------------------------------------------------------
-// First-install setup: generate the default password, store only its hash.
+// First-install setup. No credentials are generated — the trust anchor is the
+// one-time "Link" pairing the user performs from the popup.
 // ---------------------------------------------------------------------------
-chrome.runtime.onInstalled.addListener(async (details) => {
-  try {
-    await ensureDefaults();
-    if (details.reason === 'install') {
-      const existing = await getLocal(K_PASSWORD_RECORD, null);
-      if (!existing) {
-        const pw = generatePassword(24); // ~155 bits of entropy
-        const record = await hashPassword(pw);
-        // Store hash (for verification) + plaintext (for the always-on popup
-        // display/copy). Plaintext is removed the moment a custom pw is set.
-        await setLocal({
-          [K_PASSWORD_RECORD]: record,
-          [K_DEFAULT_PLAINTEXT]: pw,
-          [K_LAST_ROTATED]: Date.now(),
-          [K_ROTATE_DAYS]: DEFAULT_ROTATE_DAYS,
-        });
-      }
-    }
-  } catch (e) {
-    console.error('[bridge] onInstalled setup failed', e);
-  }
+chrome.runtime.onInstalled.addListener(async () => {
+  try { await ensureDefaults(); } catch (e) { console.error('[bridge] onInstalled setup failed', e); }
   await bootstrap();
 });
 
@@ -261,24 +219,8 @@ async function ensureDefaults() {
 async function bootstrap() {
   updateIcon(); // reflect current (likely disconnected) state immediately
   await ensureDefaults();
-  await maybeRotate();
   await ensureOffscreen();
   await ensureKeepaliveAlarm();
-}
-
-// Auto-rotate the AUTO-GENERATED password after `rotateDays`. Only rotates while
-// the auto-gen password is in use (never a custom one). After rotation, re-copy
-// it from the popup. Runs on startup + on the keepalive alarm.
-async function maybeRotate() {
-  const days = await getLocal(K_ROTATE_DAYS, DEFAULT_ROTATE_DAYS);
-  if (!days || days <= 0) return;
-  const plain = await getLocal(K_DEFAULT_PLAINTEXT, null);
-  if (!plain) return; // custom password set — leave it alone
-  const last = await getLocal(K_LAST_ROTATED, 0);
-  if (Date.now() - last < days * 86400000) return;
-  const pw = generatePassword(24);
-  const record = await hashPassword(pw);
-  await setLocal({ [K_PASSWORD_RECORD]: record, [K_DEFAULT_PLAINTEXT]: pw, [K_LAST_ROTATED]: Date.now() });
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +285,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   (async () => {
     await ensureOffscreen();
     await sendToOffscreen({ type: 'PING' }).catch(() => {});
-    await maybeRotate();
   })().catch((e) => console.error('[bridge] keepalive failed', e));
 });
 
@@ -415,52 +356,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ---------------------------------------------------------------------------
-// Auth helpers
-// ---------------------------------------------------------------------------
-// "Locked" now means simply "no access code configured yet" — normally false,
-// since a code is auto-generated on install. There is no session to lock/unlock.
-async function hasAccessCode() {
-  return (await getLocal(K_PASSWORD_RECORD, null)) !== null;
-}
-
-// ---------------------------------------------------------------------------
-// Unlock rate-limiting / lockout
-// ---------------------------------------------------------------------------
-function lockoutForFailCount(failCount) {
-  // Escalating lockouts. Early failures get a short exponential backoff; once
-  // the user crosses 5 and then 10 failures the lockout jumps sharply.
-  if (failCount >= 10) return 15 * 60 * 1000; // 15 min
-  if (failCount >= 5) return 60 * 1000; // 1 min
-  return Math.min(Math.pow(2, failCount - 1) * 1000, 30 * 1000); // 1s,2s,4s,8s...
-}
-
-async function getRateLimit() {
-  return await getLocal(K_RATE_LIMIT, { failCount: 0, lockoutUntil: 0, lastAttempt: 0 });
-}
-
-// ---------------------------------------------------------------------------
 // Command router (handles messages from the bridge WS)
 // ---------------------------------------------------------------------------
 async function handleCommand(cmd) {
   if (!cmd || typeof cmd !== 'object' || typeof cmd.id === 'undefined') {
     return { id: (cmd && cmd.id) ?? null, error: { code: 'BAD_REQUEST', message: 'Missing id' } };
   }
-  const { id, method, params = {}, token } = cmd;
+  const { id, method, params = {} } = cmd;
 
   try {
     switch (method) {
       case 'status':
         return { id, result: await doStatus() };
-
-      // Bearer model: `unlock`/`lock` are retained only for backward compat.
-      // `unlock` just verifies the code (no session is minted); `lock` is a
-      // no-op since there is no session to end.
-      case 'unlock':
-        return { id, result: await doUnlock(params) };
-
-      case 'lock':
-        await requireAuth(cmd);
-        return { id, result: { ok: true, note: 'Bearer model — no session to lock.' } };
 
       case 'tabs.list':
         await requireAuth(cmd);
@@ -492,6 +399,19 @@ async function handleCommand(cmd) {
       case 'page.eval':
         await requireAuth(cmd);
         return { id, result: await doPageEval(params) };
+
+      // CSP-safe authenticated same-origin fetch (fixed injected function, no
+      // eval) — works even on strict-CSP apps (CrowdStrike, Splunk, Slack).
+      case 'page.fetch':
+        await requireAuth(cmd);
+        return { id, result: await doPageFetch(params) };
+
+      // CSP-EXEMPT arbitrary code exec (chrome.userScripts when available, else
+      // the eval path) — for extractors that must read an in-page token/CSRF
+      // header before fetching on strict-CSP apps.
+      case 'page.exec':
+        await requireAuth(cmd);
+        return { id, result: await doPageExec(params) };
 
       case 'page.screenshot':
         await requireAuth(cmd);
@@ -583,40 +503,15 @@ async function finishPairing(bridgePubHex) {
 
 async function clearPairing() { pairKeyHex = null; pairEphemeral = null; await chrome.storage.local.remove(K_PAIR_KEY); }
 
-// Authorize a command. Preferred path: a valid bridge signature (paired). Until
-// the bridge is paired, fall back to the legacy bearer access code so nothing
-// breaks mid-migration.
+// Authorize a command. The ONLY trust anchor is the Link pairing: the bridge
+// signs every relayed frame with the shared HMAC key and we verify it. If this
+// browser isn't linked yet, reject — the user must click Link in the popup.
 async function requireAuth(cmd) {
-  if (await getPairKey()) {
-    if (await verifyFrameMac(cmd)) return;
-    throw new CmdError('UNAUTHORIZED', 'Missing or invalid bridge signature.');
+  if (!(await getPairKey())) {
+    throw new CmdError('UNAUTHORIZED', 'Browser is not linked to the bridge. Click "Link" in the extension.');
   }
-  const code =
-    cmd && typeof cmd.token === 'string' ? cmd.token
-      : cmd && typeof cmd.password === 'string' ? cmd.password : null;
-  if (code === null) throw new CmdError('UNAUTHORIZED', 'Not paired; provide the access code (as `token`).');
-  await checkPassword(code); // throws on wrong/locked-out
-}
-
-// Verify a password against the stored record with lockout/rate-limiting.
-// Returns true on success; throws CmdError('RATE_LIMITED'|'UNAUTHORIZED'|...).
-async function checkPassword(password) {
-  const rl = await getRateLimit();
-  const now = Date.now();
-  if (rl.lockoutUntil && now < rl.lockoutUntil) {
-    throw new CmdError('RATE_LIMITED', `Too many failed attempts. Retry in ${Math.ceil((rl.lockoutUntil - now) / 1000)}s.`);
-  }
-  const record = await getLocal(K_PASSWORD_RECORD, null);
-  if (!record) throw new CmdError('NOT_INITIALIZED', 'No password configured. Open the extension popup.');
-  const ok = await verifyPassword(password, record);
-  if (!ok) {
-    const failCount = (rl.failCount || 0) + 1;
-    const lockoutUntil = now + lockoutForFailCount(failCount);
-    await setLocal({ [K_RATE_LIMIT]: { failCount, lockoutUntil, lastAttempt: now } });
-    throw new CmdError('UNAUTHORIZED', `Incorrect password (attempt ${failCount}). Retry in ${Math.ceil((lockoutUntil - now) / 1000)}s.`);
-  }
-  await setLocal({ [K_RATE_LIMIT]: { failCount: 0, lockoutUntil: 0, lastAttempt: now } });
-  return true;
+  if (await verifyFrameMac(cmd)) return;
+  throw new CmdError('UNAUTHORIZED', 'Missing or invalid bridge signature.');
 }
 
 // ---------------------------------------------------------------------------
@@ -632,26 +527,10 @@ async function doStatus() {
   return {
     running: true,
     version: VERSION,
-    locked: !(await hasAccessCode()),
+    locked: !(await getPairKey()), // "locked" = not linked to the bridge yet
     tabCount,
     wsConnected,
     capabilities: CAPABILITIES,
-  };
-}
-
-// `unlock` is retained for backward compatibility only. In the bearer model it
-// simply VERIFIES the access code (rate-limited) and echoes guidance — it does
-// NOT mint a session token. Callers should just send the code on each request.
-async function doUnlock(params) {
-  const code = params && (params.password ?? params.token);
-  if (typeof code !== 'string') {
-    throw new CmdError('BAD_REQUEST', 'params.password (or token) is required.');
-  }
-  await checkPassword(code); // throws on wrong/locked-out
-  return {
-    ok: true,
-    bearer: true,
-    note: 'Send this code as `token` on every request; valid until it rotates.',
   };
 }
 
@@ -752,6 +631,95 @@ async function doPageEval(params) {
     throw new CmdError('EVAL_ERROR', out.error);
   }
   return { tabId, value: out.value };
+}
+
+// CSP-safe authenticated same-origin fetch. Runs a FIXED injected function
+// (not eval) in the tab's MAIN world with the request passed as args, so it is
+// never blocked by the page's Content-Security-Policy (`unsafe-eval`). This is
+// the port of the old gateway's fetch_in_page: the tab's own fetch carries its
+// cookies (credentials:'include'). Returns { ok, status, url, data } or a
+// structured { ok:false, needsAuth?, error:{type,message} } the extractors
+// branch on (login_redirect / http_4xx / fetch_error).
+async function doPageFetch(params) {
+  const { tabId, url, method = 'GET', headers = {}, body = null } = params || {};
+  if (typeof tabId !== 'number' || typeof url !== 'string') {
+    throw new CmdError('BAD_REQUEST', 'params.tabId (number) and params.url (string) are required.');
+  }
+  const [res] = await chrome.scripting.executeScript({
+    world: 'MAIN',
+    target: { tabId },
+    func: async (req) => {
+      try {
+        const r = await fetch(req.url, {
+          method: req.method || 'GET',
+          headers: req.headers || {},
+          body: req.body != null ? req.body : undefined,
+          credentials: 'include',
+          redirect: 'manual',
+        });
+        // An opaqueredirect (manual redirect) to a login page => not authenticated.
+        if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) {
+          return { ok: false, status: r.status, url: req.url, needsAuth: true, error: { type: 'login_redirect', message: 'Request was redirected (likely to sign-in).' } };
+        }
+        const ct = (r.headers.get('content-type') || '').toLowerCase();
+        let data;
+        try { data = ct.includes('json') ? await r.json() : await r.text(); }
+        catch { try { data = await r.text(); } catch { data = null; } }
+        if (r.status === 401 || r.status === 403) {
+          return { ok: false, status: r.status, url: r.url, needsAuth: true, data, error: { type: 'http_' + r.status, message: 'HTTP ' + r.status } };
+        }
+        if (!r.ok) {
+          return { ok: false, status: r.status, url: r.url, data, error: { type: 'http_' + r.status, message: 'HTTP ' + r.status } };
+        }
+        return { ok: true, status: r.status, url: r.url, data };
+      } catch (e) {
+        return { ok: false, error: { type: 'fetch_error', message: String((e && e.message) || e) } };
+      }
+    },
+    args: [{ url, method, headers, body }],
+  });
+  return res ? res.result : { ok: false, error: { type: 'no_result', message: 'No result from page.' } };
+}
+
+// CSP-EXEMPT code execution. The page's CSP governs `eval()` even in the MAIN
+// world, so the eval-based page.eval fails on strict-CSP apps. chrome.userScripts
+// injects code that is NOT subject to the page CSP. Prefer userScripts.execute
+// (Chrome 135+); fall back to the eval path when it's unavailable so lenient
+// sites still work. `code` is an async-function BODY that returns a value.
+async function doPageExec(params) {
+  const { tabId, code } = params || {};
+  if (typeof tabId !== 'number' || typeof code !== 'string') {
+    throw new CmdError('BAD_REQUEST', 'params.tabId (number) and params.code (string) are required.');
+  }
+  // The completion value of the injected classic script is its trailing
+  // expression — so we END with the async IIFE (no top-level `return`, which
+  // would be a syntax error in a classic script). userScripts.execute resolves
+  // a thenable completion value before returning it.
+  const wrapped = 'globalThis.__aibx = (async () => {\n' + code + '\n})(); __aibx;';
+  // Preferred: chrome.userScripts.execute — CSP-exempt (Chrome 135+).
+  try {
+    if (chrome.userScripts && typeof chrome.userScripts.execute === 'function') {
+      const results = await chrome.userScripts.execute({
+        target: { tabId },
+        world: 'MAIN',
+        injectImmediately: true,
+        js: [{ code: wrapped }],
+      });
+      const r = Array.isArray(results) ? results[0] : results;
+      if (r && r.error) throw new CmdError('EVAL_ERROR', String((r.error && r.error.message) || r.error));
+      if (r && Object.prototype.hasOwnProperty.call(r, 'result')) {
+        let value = r.result;
+        if (value && typeof value.then === 'function') value = await value;
+        return { tabId, value: JSON.parse(JSON.stringify(value ?? null)) };
+      }
+      // Unexpected shape (API differs on this Chrome) → degrade to the eval path.
+    }
+  } catch (e) {
+    if (e && e.code === 'EVAL_ERROR') throw e;
+    // userScripts not permitted/available/mis-shaped → fall through.
+  }
+  // Fallback: eval in MAIN world (subject to page CSP — works on lenient sites).
+  return doPageEval({ tabId, expression: '(async () => {\n' + code + '\n})()' });
 }
 
 async function doPageScreenshot(params) {
@@ -987,27 +955,15 @@ async function handlePopup(msg) {
     case 'getState': {
       await ensureOffscreen();
       const bridgeUrl = await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
-      // The auto-generated default password — legacy bootstrap before pairing.
-      const defaultPassword = await getLocal(K_DEFAULT_PLAINTEXT, null);
-      const rl = await getRateLimit();
       return {
         running: true,
         version: VERSION,
-        locked: !(await hasAccessCode()),
+        locked: !(await getPairKey()), // "locked" = not linked yet
         wsConnected,
         bridgeUrl,
-        defaultPassword,
-        isCustomPassword: defaultPassword === null,
         monitored: monitorList(),
-        rateLimit: { failCount: rl.failCount || 0, lockoutUntil: rl.lockoutUntil || 0 },
         paired: !!(await getPairKey()),
       };
-    }
-
-    case 'setRotateDays': {
-      const d = Number(msg.days);
-      await setLocal({ [K_ROTATE_DAYS]: Number.isFinite(d) && d >= 0 ? d : 0 });
-      return { ok: true };
     }
 
     case 'pair': {
@@ -1017,44 +973,6 @@ async function handlePopup(msg) {
 
     case 'unpair': {
       await clearPairing();
-      return { ok: true };
-    }
-
-    case 'lock': {
-      // Bearer model: no session to end. Kept as a harmless no-op.
-      return { ok: true, note: 'Bearer model — no session to lock.' };
-    }
-
-    case 'unlock': {
-      try {
-        const result = await doUnlock({ password: msg.password });
-        return { ok: true, ...result };
-      } catch (e) {
-        return { ok: false, code: e.code || 'ERROR', error: e.message };
-      }
-    }
-
-    case 'regenerateDefault': {
-      // Re-roll a fresh auto-generated access code (stays visible/copyable).
-      // The old code stops working immediately — checkPassword verifies against
-      // the new record — which is exactly the "reset" behavior we want.
-      const pw = generatePassword(24);
-      const record = await hashPassword(pw);
-      await setLocal({ [K_PASSWORD_RECORD]: record, [K_DEFAULT_PLAINTEXT]: pw, [K_LAST_ROTATED]: Date.now() });
-      return { ok: true, password: pw };
-    }
-
-    case 'changePassword': {
-      const { newPassword } = msg;
-      // No current-password check needed: the popup is only reachable by the
-      // person at the machine, and the default is shown right there anyway.
-      const policy = validatePasswordPolicy(newPassword || '');
-      if (!policy.ok) return { ok: false, error: policy.reasons.join(' ') };
-      const newRecord = await hashPassword(newPassword);
-      await setLocal({ [K_PASSWORD_RECORD]: newRecord });
-      // Custom password: stop displaying a plaintext (we only keep the hash).
-      await chrome.storage.local.remove(K_DEFAULT_PLAINTEXT);
-      // Old code stops working automatically (verified against the new record).
       return { ok: true };
     }
 

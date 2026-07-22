@@ -6,7 +6,6 @@
 const $ = (id) => document.getElementById(id);
 const send = (action, extra = {}) => chrome.runtime.sendMessage({ type: 'POPUP', action, ...extra });
 
-let pwValue = null;
 let dashboardUrl = 'http://127.0.0.1:8787/';
 let extPaired = false;
 
@@ -26,8 +25,6 @@ async function refresh() {
   $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
   $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
 
-  pwValue = s.defaultPassword || '';
-  $('pwCode').value = pwValue;
   dashboardUrl = dashUrlFrom(s.bridgeUrl);
   $('openDash').disabled = !s.wsConnected;
   $('openDash').title = s.wsConnected ? dashboardUrl : 'Bridge not running';
@@ -43,7 +40,6 @@ async function refresh() {
       : `🖥 Local bridge on ${place} (${host}) — loopback only`;
   $('bridgeMeta').title = `A helper on your own computer at ${host}. Traffic stays on this device (loopback). Linking pairs this browser to it with a one-time key exchange.`;
 
-  $('pwSection').classList.toggle('hidden', paired);
   $('agentsSection').classList.toggle('hidden', !s.wsConnected);
   $('navSection').classList.toggle('hidden', !s.wsConnected);
   $('linkBtn').textContent = paired ? 'Unlink' : 'Link';
@@ -99,16 +95,6 @@ async function renderNav() {
 }
 
 // ---- events ----
-$('copyPw').addEventListener('click', async () => {
-  if (!pwValue) return;
-  try { await navigator.clipboard.writeText(pwValue); $('copyPw').textContent = 'Copied!'; setTimeout(() => ($('copyPw').textContent = 'Copy'), 1200); }
-  catch { $('copyPw').textContent = 'Copy failed'; }
-});
-$('regenPw').addEventListener('click', async () => {
-  const r = await send('regenerateDefault');
-  if (r && r.password) { pwValue = r.password; $('pwCode').value = pwValue; }
-  refresh();
-});
 $('openDash').addEventListener('click', () => { if (!$('openDash').disabled) chrome.tabs.create({ url: bridgeBase() + '/config' }); });
 $('linkBtn').addEventListener('click', async () => {
   const s = await send('getState');

@@ -33,7 +33,6 @@
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   input[type=text]{background:var(--inp);color:var(--fg);border:1px solid var(--line);
     border-radius:7px;padding:6px 8px;font-size:12px;width:100%}
-  #pwCode{font-family:ui-monospace,Menlo,monospace;letter-spacing:.5px}
   button.gbtn{width:30px;height:30px;padding:0;font-size:17px;line-height:1;flex:none;
     display:flex;align-items:center;justify-content:center}
   button.gbtn.arrow{color:var(--accent)}
@@ -73,16 +72,6 @@
   <div class="section hidden" id="navSection">
     <div class="label">Modules</div>
     <div id="navLinks"></div>
-  </div>
-
-  <!-- Legacy access code — only until this browser is paired -->
-  <div class="section" id="pwSection">
-    <div class="label">Access code <span class="muted">(legacy — Link to replace)</span></div>
-    <div class="row">
-      <input id="pwCode" type="text" readonly value="" />
-      <button id="copyPw" class="primary">Copy</button>
-      <button id="regenPw" class="gbtn" title="Generate a new code">↻</button>
-    </div>
   </div>
 
   <script type="module" src="popup.js"></script>
