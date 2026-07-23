@@ -13,11 +13,14 @@ export const state = {
   grants: {},    // client_id -> { client_id, name, resource, created, lastUsed }  (authorized agents)
   tokens: {},    // access_token -> { client_id, resource, exp }
   refresh: {},   // refresh_token -> { client_id, resource }
-  pairing: null, // { key: <hex shared HMAC key>, paired: true, created } — bridge↔extension
+  pairing: null, // legacy single bridge↔extension pairing (migrated into `browsers`)
+  browsers: {},  // browserId -> { id, name, key(hex), created, lastSeen } — linked browsers
+  activeBrowser: null, // browserId that currently receives relayed commands
 
   // Capability platform (the rule engine + modules).
   modulesEnabled: [],  // [moduleId] — which capability modules are active
-  rules: [],           // [{ id, source, destination, permissions[], enabled, moduleId? }]
+  rules: [],           // ordered, top-down first-match: [{ id, action:'allow'|'deny', source, destination, permissions[], enabled, moduleId? }]
+  destinations: [],    // user-created destination artifacts: [{ id, name, patterns[] }]
   artifacts: {},       // moduleId -> { destinations: { destId: { patterns[], contents[] } }, sources: {…} }
 };
 
@@ -25,9 +28,10 @@ export function load() {
   try {
     if (existsSync(FILE)) {
       const d = JSON.parse(readFileSync(FILE, 'utf8'));
-      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts']) if (d[k]) state[k] = d[k];
-      for (const k of ['modulesEnabled', 'rules']) if (Array.isArray(d[k])) state[k] = d[k];
+      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts', 'browsers']) if (d[k]) state[k] = d[k];
+      for (const k of ['modulesEnabled', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
       if ('pairing' in d) state.pairing = d.pairing;
+      if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;
     }
   } catch { /* start empty */ }
   return state;

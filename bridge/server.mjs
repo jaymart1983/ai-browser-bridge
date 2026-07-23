@@ -27,9 +27,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
-import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, revokeAgent } from './oauth.mjs';
+import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle } from './mcp.mjs';
-import { pairInit, signFrame, unpair, pairingStatus } from './pairing.mjs';
+import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, touchBrowser, adoptLegacyForBrowser } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -42,10 +42,24 @@ const COMMAND_PATH = '/command';
 const COMMAND_TIMEOUT_MS = Number(process.env.BRIDGE_TIMEOUT_MS || 30000);
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB (screenshots/HTML can be large)
 
-// The currently connected extension agent (most recent wins). We keep a single
-// active agent; if several connect, the newest is used and older ones remain
-// able to reply to their own in-flight requests.
-let agentSocket = null;
+// Linked browsers can each hold an open agent socket. Commands are relayed to the
+// ACTIVE browser only; the others stay connected (for status + fast switching).
+const agentSockets = new Map(); // browserId -> ws
+function activeSocket() {
+  const ws = state.activeBrowser && agentSockets.get(state.activeBrowser);
+  return ws && ws.readyState === ws.OPEN ? ws : null;
+}
+function agentConnected() { return !!activeSocket(); }
+function connectedBrowserIds() {
+  const set = new Set();
+  for (const [id, ws] of agentSockets) if (ws.readyState === ws.OPEN) set.add(id);
+  return set;
+}
+function broadcastToAgents(obj) {
+  const s = JSON.stringify(obj);
+  for (const ws of agentSockets.values()) { try { if (ws.readyState === ws.OPEN) ws.send(s); } catch {} }
+}
+function sendToOneAgent(ws, obj) { try { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); } catch {} }
 
 // Correlation table: id -> { resolve, reject, timer }.
 const pending = new Map();
@@ -113,7 +127,7 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'ai-browser-bridge',
-      agentConnected: !!(agentSocket && agentSocket.readyState === agentSocket.OPEN),
+      agentConnected: agentConnected(),
       commandPath: COMMAND_PATH,
       agentPath: AGENT_PATH,
     });
@@ -125,7 +139,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/monitor/sessions') {
     return sendJson(res, 200, {
-      agentConnected: !!(agentSocket && agentSocket.readyState === agentSocket.OPEN),
+      agentConnected: agentConnected(),
       sessions: listSessions(), usage: usageByRoot(), roots: { tmp: MON_ROOTS.tmp, perm: MON_ROOTS.perm },
     });
   }
@@ -182,13 +196,20 @@ const server = http.createServer((req, res) => {
 
   // Bridge management for the extension popup (loopback only).
   if (req.method === 'GET' && url.pathname === '/bridge/status') {
-    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), agentConnected: !!(agentSocket && agentSocket.readyState === agentSocket.OPEN) });
+    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), stale: listStale(), browsers: listBrowsers(connectedBrowserIds()), activeBrowser: state.activeBrowser, agentConnected: agentConnected() });
   }
   if (req.method === 'POST' && url.pathname === '/bridge/revoke') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b.client_id ? revokeAgent(String(b.client_id)) : { ok: false, error: 'client_id required' }));
   }
+  if (req.method === 'POST' && url.pathname === '/bridge/remove') {
+    return readJsonBody(req).then((b) => sendJson(res, 200, b.client_id ? removeClient(String(b.client_id)) : { ok: false, error: 'client_id required' }));
+  }
   if (req.method === 'POST' && url.pathname === '/bridge/unpair') {
-    unpair(); return sendJson(res, 200, { ok: true });
+    return readJsonBody(req).then((b) => { unpairBrowser(b && b.browserId ? String(b.browserId) : null); notifyActive(); return sendJson(res, 200, { ok: true }); });
+  }
+  // Choose which linked browser receives relayed commands ("use THIS browser").
+  if (req.method === 'POST' && url.pathname === '/bridge/activate') {
+    return readJsonBody(req).then((b) => { const r = b && b.browserId ? setActiveBrowser(String(b.browserId)) : { ok: false, error: 'browserId required' }; notifyActive(); return sendJson(res, 200, r); });
   }
 
   if (url.pathname === COMMAND_PATH) {
@@ -258,9 +279,9 @@ function handleCommandRequest(req, res) {
       });
     }
 
-    if (!agentSocket || agentSocket.readyState !== agentSocket.OPEN) {
+    if (!agentConnected()) {
       return sendJson(res, 503, {
-        error: { code: 'NO_AGENT', message: 'Extension is not connected to the bridge.' },
+        error: { code: 'NO_AGENT', message: 'No active browser connected to the bridge.' },
       });
     }
 
@@ -296,8 +317,8 @@ function handleCommandRequest(req, res) {
 // Relay a command to the extension and return its result (throws on error).
 // Used by the MCP tools. Signs the frame with the pairing key when paired.
 async function relayCommand(method, params) {
-  if (!agentSocket || agentSocket.readyState !== agentSocket.OPEN) {
-    throw new Error('Extension is not connected to the bridge.');
+  if (!agentConnected()) {
+    throw new Error('No active browser connected to the bridge.');
   }
   const frame = signFrame({ id: nextId(), method, params: params || {} });
   const reply = await relayToAgent(frame);
@@ -320,7 +341,9 @@ function relayToAgent(frame) {
     pending.set(frame.id, { resolve, reject, timer });
 
     try {
-      agentSocket.send(JSON.stringify(frame));
+      const ws = activeSocket();
+      if (!ws) throw new Error('No active browser connected.');
+      ws.send(JSON.stringify(frame));
     } catch (e) {
       clearTimeout(timer);
       pending.delete(frame.id);
@@ -355,10 +378,18 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
+// Tell every linked browser whether IT is the active one (so popups/badges update
+// the instant the active browser changes).
+function notifyActive() {
+  for (const [bid, ws] of agentSockets) sendToOneAgent(ws, { type: 'active', active: state.activeBrowser === bid, activeBrowser: state.activeBrowser });
+}
+// Let OAuth push the pending-request count so every linked browser badges its icon
+// (auth is bridge-wide, not tied to one browser).
+configureOAuth({ notifyPending: (n) => broadcastToAgents({ type: 'pending', count: n }) });
+
 wss.on('connection', (ws) => {
-  // Newest agent becomes active.
-  agentSocket = ws;
   log('extension agent connected');
+  sendToOneAgent(ws, { type: 'pending', count: listPending().length }); // sync the badge on connect
 
   ws.on('message', (data) => {
     let msg;
@@ -368,13 +399,29 @@ wss.on('connection', (ws) => {
       return; // ignore malformed frames from the agent
     }
     if (!msg) return;
-    // Pairing handshake: extension sends its ECDH public key; we derive the
-    // shared HMAC key and return ours. One-time (persists in state).
+    // Identity frame: learn which browser this socket is. Map it, migrate a legacy
+    // pairing onto it if needed, and tell it whether it's the active browser.
+    if (msg.type === 'hello') {
+      const bid = typeof msg.browserId === 'string' && msg.browserId ? msg.browserId : null;
+      if (bid) {
+        ws._browserId = bid;
+        adoptLegacyForBrowser(bid, msg.browserName);
+        touchBrowser(bid, msg.browserName);
+        agentSockets.set(bid, ws);
+        sendToOneAgent(ws, { type: 'active', active: state.activeBrowser === bid, activeBrowser: state.activeBrowser });
+      }
+      return;
+    }
+    // Pairing handshake: extension sends its ECDH public key (+ its browser id);
+    // we derive the shared HMAC key for THAT browser and return ours.
     if (msg.type === 'pair_init' && typeof msg.pub === 'string') {
       try {
-        const pub = pairInit(msg.pub);
+        const bid = typeof msg.browserId === 'string' && msg.browserId ? msg.browserId : (ws._browserId || null);
+        const pub = pairInit(msg.pub, bid, msg.browserName);
+        if (bid) { ws._browserId = bid; agentSockets.set(bid, ws); }
         ws.send(JSON.stringify({ type: 'pair_ack', pub }));
-        log('paired with extension');
+        if (bid) sendToOneAgent(ws, { type: 'active', active: state.activeBrowser === bid, activeBrowser: state.activeBrowser });
+        log('paired with browser', bid || '(legacy)');
       } catch (e) { log('pair error:', e && e.message); }
       return;
     }
@@ -394,10 +441,10 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (agentSocket === ws) agentSocket = null;
-    // Extension gone → nothing can be recording; reset the tray to blue.
-    liveSessions.clear(); trayRefresh();
-    log('extension agent disconnected');
+    if (ws._browserId && agentSockets.get(ws._browserId) === ws) agentSockets.delete(ws._browserId);
+    // No browser recording anymore if none are connected → reset the tray.
+    if (!agentSockets.size) { liveSessions.clear(); trayRefresh(); }
+    log('extension agent disconnected', ws._browserId || '');
   });
 
   ws.on('error', (e) => {
@@ -405,13 +452,15 @@ wss.on('connection', (ws) => {
   });
 });
 
-// Basic keepalive ping to the agent so dead sockets are detected promptly.
+// Basic keepalive ping to all connected agents so dead sockets are detected.
 setInterval(() => {
-  if (agentSocket && agentSocket.readyState === agentSocket.OPEN) {
-    try {
-      agentSocket.ping();
-    } catch {
-      /* ignore */
+  for (const ws of agentSockets.values()) {
+    if (ws.readyState === ws.OPEN) {
+      try {
+        ws.ping();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }, 20000);

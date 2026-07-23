@@ -38,11 +38,14 @@ function connect() {
     return;
   }
 
-  ws.addEventListener('open', () => {
+  ws.addEventListener('open', async () => {
     backoffMs = 500; // reset backoff on a good connection
     notifyStatus(true);
-    // Announce ourselves so the bridge knows this is the extension agent.
-    safeSend({ type: 'hello', role: 'extension', version: '0.1.0' });
+    // Announce ourselves + WHICH browser we are, so the bridge can map this socket
+    // to a linked browser (and route/activate correctly with several linked).
+    let ident = {};
+    try { ident = await chrome.storage.local.get(['browserId', 'browserName']); } catch {}
+    safeSend({ type: 'hello', role: 'extension', version: '0.1.0', browserId: ident.browserId || null, browserName: ident.browserName || null });
   });
 
   ws.addEventListener('message', (ev) => {
@@ -102,6 +105,11 @@ async function onWsMessage(raw) {
     // Pairing handshake reply → hand to the SW to finish key derivation.
     if (cmd && cmd.type === 'pair_ack') {
       chrome.runtime.sendMessage({ type: 'PAIR_ACK', pub: cmd.pub }).catch(() => {});
+      return;
+    }
+    // Pending-auth count → hand to the SW to badge the toolbar icon.
+    if (cmd && cmd.type === 'pending') {
+      chrome.runtime.sendMessage({ type: 'PENDING', count: cmd.count | 0 }).catch(() => {});
       return;
     }
     if (cmd && cmd.type) return; // other hello/ack frames — no reply

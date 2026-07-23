@@ -43,6 +43,33 @@ const KEEPALIVE_PERIOD_MIN = 25 / 60;
 // extension keeps only the pairing key + the browser primitives.
 const K_PAIR_KEY = 'pairKeyHex'; // ECDH-derived HMAC key (hex) shared with the bridge
 const K_BRIDGE_URL = 'bridgeUrl'; // string
+const K_BROWSER_ID = 'browserId'; // stable per-install id so the bridge can tell browsers apart
+const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge / …)
+
+// Best-effort browser name for the linked-browsers list in the bridge.
+function detectBrowserName() {
+  try {
+    const ua = (self.navigator && navigator.userAgent) || '';
+    if (self.navigator && navigator.brave) return 'Brave';
+    if (/\bEdg\//.test(ua)) return 'Edge';
+    if (/\bOPR\//.test(ua)) return 'Opera';
+    if (/\bVivaldi/.test(ua)) return 'Vivaldi';
+    if (/\bChrome\//.test(ua)) return 'Chrome';
+    return 'Browser';
+  } catch { return 'Browser'; }
+}
+// Ensure this install has a stable id + name (used to identify it to the bridge).
+async function ensureBrowserIdentity() {
+  const cur = await chrome.storage.local.get([K_BROWSER_ID, K_BROWSER_NAME]);
+  const patch = {};
+  if (typeof cur[K_BROWSER_ID] !== 'string' || !cur[K_BROWSER_ID]) {
+    const rnd = (self.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, '') : (Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36));
+    patch[K_BROWSER_ID] = 'br_' + rnd.slice(0, 16);
+  }
+  if (typeof cur[K_BROWSER_NAME] !== 'string' || !cur[K_BROWSER_NAME]) patch[K_BROWSER_NAME] = detectBrowserName();
+  if (Object.keys(patch).length) await setLocal(patch);
+  return { id: patch[K_BROWSER_ID] || cur[K_BROWSER_ID], name: patch[K_BROWSER_NAME] || cur[K_BROWSER_NAME] };
+}
 
 // Capabilities advertised by `status`.
 const CAPABILITIES = [
@@ -66,6 +93,7 @@ const CAPABILITIES = [
 // Live connection state (in-memory; not persisted).
 // ---------------------------------------------------------------------------
 let wsConnected = false;
+let pendingAuth = 0; // count of agents awaiting your approval (drives the top-left badge)
 
 // Tabs currently being recorded: tabId -> { sessionKey, startedAt, eventCount, ... }.
 // Declared early so updateIcon() (called during bootstrap, before the monitor
@@ -113,7 +141,7 @@ function arrowPath(ctx, cx, dir, s, mag = 1) {
 
 // Data-transfer glyph: a SOLID down-arrow (left) + an OUTLINED up-arrow (right).
 // `phase` (0/1) swaps which arrow is larger, so alternating it animates flow.
-function drawTransferIcon(size, color, phase = 0) {
+function drawTransferIcon(size, color, phase = 0, pending = 0) {
   let canvas;
   try {
     canvas = new OffscreenCanvas(size, size);
@@ -137,6 +165,13 @@ function drawTransferIcon(size, color, phase = 0) {
   ctx.lineWidth = Math.max(1, 1.4 * s);
   arrowPath(ctx, 11, 'up', s, magR);
   ctx.stroke();
+  // Pending-auth indicator: a small dot in the TOP-LEFT corner (an agent is
+  // waiting for approval). White ring so it reads on any toolbar theme.
+  if (pending > 0) {
+    const cx = 3 * s, cy = 3 * s, r = 2.7 * s;
+    ctx.beginPath(); ctx.arc(cx, cy, r + Math.max(0.7, 0.7 * s), 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fillStyle = '#d29922'; ctx.fill();
+  }
   return ctx.getImageData(0, 0, size, size);
 }
 
@@ -158,7 +193,7 @@ function updateIcon() {
   const color = iconColor();
   const imageData = {};
   for (const size of [16, 32, 48]) {
-    const img = drawTransferIcon(size, color, iconPhase);
+    const img = drawTransferIcon(size, color, iconPhase, pendingAuth);
     if (img) imageData[size] = img;
   }
   if (Object.keys(imageData).length && chrome.action && chrome.action.setIcon) {
@@ -167,6 +202,7 @@ function updateIcon() {
     chrome.action
       .setTitle({
         title: `AI Browser Bridge — ${wsConnected ? 'bridge connected' : 'bridge OFF'}` +
+          (pendingAuth ? ` · ${pendingAuth} agent${pendingAuth === 1 ? '' : 's'} awaiting approval` : '') +
           (n ? ` · recording ${n} tab${n === 1 ? '' : 's'}` : ''),
       })
       .catch(() => {});
@@ -214,6 +250,7 @@ bootstrap().catch((e) => console.error('[bridge] bootstrap failed', e));
 async function ensureDefaults() {
   const cur = await chrome.storage.local.get([K_BRIDGE_URL]);
   if (typeof cur[K_BRIDGE_URL] !== 'string') await setLocal({ [K_BRIDGE_URL]: DEFAULT_BRIDGE_URL });
+  await ensureBrowserIdentity(); // stable id + name available before the WS says hello
 }
 
 async function bootstrap() {
@@ -319,8 +356,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Connection status pushed from offscreen.
   if (msg.type === 'WS_STATUS') {
     wsConnected = !!msg.connected;
+    if (!wsConnected) pendingAuth = 0; // clear the badge when the bridge drops
     updateIcon();
     return; // no response needed
+  }
+
+  // Pending-auth count pushed from the bridge → top-left icon badge.
+  if (msg.type === 'PENDING') {
+    pendingAuth = Math.max(0, msg.count | 0);
+    updateIcon();
+    return;
   }
 
   // Pairing handshake reply from the bridge (relayed via offscreen).
@@ -485,7 +530,8 @@ async function startPairing() {
   const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
   pairEphemeral = kp;
   const raw = await crypto.subtle.exportKey('raw', kp.publicKey);
-  sendToOffscreen({ type: 'WS_SEND', frame: { type: 'pair_init', pub: bufToHex(raw) } }).catch(() => {});
+  const { id, name } = await ensureBrowserIdentity();
+  sendToOffscreen({ type: 'WS_SEND', frame: { type: 'pair_init', pub: bufToHex(raw), browserId: id, browserName: name } }).catch(() => {});
   return { ok: true };
 }
 
@@ -955,6 +1001,7 @@ async function handlePopup(msg) {
     case 'getState': {
       await ensureOffscreen();
       const bridgeUrl = await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
+      const ident = await ensureBrowserIdentity();
       return {
         running: true,
         version: VERSION,
@@ -963,6 +1010,8 @@ async function handlePopup(msg) {
         bridgeUrl,
         monitored: monitorList(),
         paired: !!(await getPairKey()),
+        browserId: ident.id,
+        browserName: ident.name,
       };
     }
 

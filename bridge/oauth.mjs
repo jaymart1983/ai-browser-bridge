@@ -20,6 +20,14 @@ const now = () => Date.now();
 const ACCESS_TTL_MS = 30 * 24 * 3600 * 1000; // 30 days (refreshable)
 const CODE_TTL_MS = 5 * 60 * 1000;
 
+// Notify the extension (for the toolbar badge) whenever the pending-request count
+// changes, so an incoming connection surfaces as an icon indicator + popup entry
+// instead of relying on a dedicated consent webpage.
+let notifyPending = null;
+export function configureOAuth(o) { notifyPending = (o && o.notifyPending) || null; }
+function pendingCount() { return [...pending.values()].filter((p) => !p.decided).length; }
+function pingPending() { if (notifyPending) { try { notifyPending(pendingCount()); } catch {} } }
+
 // Pending authorization requests awaiting user consent: reqId -> {...}
 const pending = new Map();
 // Issued-but-unredeemed auth codes: code -> {...}
@@ -93,14 +101,80 @@ export function wwwAuthenticate(req) {
 }
 
 // --- Agent management (for the extension popup) ------------------------------
+const hostOf = (u) => { try { return new URL(u).host; } catch { return ''; } };
+
+// Keep every grant's display name distinct. If another (e.g. stale) grant already
+// uses the requested name, the newcomer gets a " (2)", " (3)", … suffix — so two
+// clients that both call themselves "Claude Code" are still tellable apart. A
+// client re-authorizing under its own id keeps the name it already had.
+function uniqueGrantName(desired, exceptClientId) {
+  const base = String(desired || 'Unnamed agent').trim() || 'Unnamed agent';
+  const taken = new Set(Object.values(state.grants).filter((g) => g.client_id !== exceptClientId).map((g) => g.name));
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i++) { const cand = `${base} (${i})`; if (!taken.has(cand)) return cand; }
+}
+
+// Record (or refresh) the grant for an approved consent request, capturing enough
+// metadata to tell agents apart in the UI (raw name, callback origin, timestamps).
+function createGrant(p) {
+  const existing = state.grants[p.client_id];
+  const client = state.clients[p.client_id] || {};
+  state.grants[p.client_id] = {
+    client_id: p.client_id,
+    name: existing ? existing.name : uniqueGrantName(p.client_name, p.client_id),
+    client_name: p.client_name || 'Unnamed agent',
+    resource: p.resource,
+    origin: hostOf(p.redirect_uri) || hostOf((client.redirect_uris || [])[0]),
+    created: existing ? existing.created : now(),
+    lastUsed: existing ? (existing.lastUsed || 0) : 0,
+  };
+  save();
+}
+
+// Garbage-collect only ANCIENT orphan client registrations (no grant, no pending,
+// older than the cutoff). We keep recent stale ones VISIBLE (see listStale) so the
+// user can see every registration in the Authorized agents list and remove them
+// by hand — rather than having them silently swept.
+export function gcClients(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+  const activePending = new Set([...pending.values()].filter((p) => !p.decided).map((p) => p.client_id));
+  let removed = 0;
+  for (const [cid, c] of Object.entries(state.clients)) {
+    if (state.grants[cid]) continue;                    // authorized → keep (needed for refresh)
+    if (activePending.has(cid)) continue;               // mid-consent → keep
+    if (now() - (c.created || 0) < maxAgeMs) continue;  // recent → keep (stays visible + removable)
+    delete state.clients[cid]; removed++;
+  }
+  if (removed) save();
+  return removed;
+}
+
 export function listAgents() {
-  return Object.values(state.grants).map((g) => ({ client_id: g.client_id, name: g.name, created: g.created, lastUsed: g.lastUsed || 0 }));
+  return Object.values(state.grants).map((g) => ({
+    client_id: g.client_id,
+    name: g.name,
+    client_name: g.client_name || g.name,
+    origin: g.origin || '',
+    resource: g.resource || '',
+    created: g.created || 0,
+    lastUsed: g.lastUsed || 0,
+  }));
 }
 export function listPending() {
-  return [...pending.values()].filter((p) => !p.decided).map((p) => ({ reqId: p.reqId, name: p.client_name, created: p.created }));
+  return [...pending.values()].filter((p) => !p.decided).map((p) => ({ reqId: p.reqId, client_id: p.client_id, name: p.client_name, origin: hostOf(p.redirect_uri), created: p.created }));
 }
+// Registrations that are neither active grants nor pending — "stale". Shown in
+// the Authorized agents list so ALL grants (active/pending/stale) are visible.
+export function listStale() {
+  const pend = new Set([...pending.values()].filter((p) => !p.decided).map((p) => p.client_id));
+  return Object.values(state.clients)
+    .filter((c) => !state.grants[c.client_id] && !pend.has(c.client_id))
+    .map((c) => ({ client_id: c.client_id, name: c.client_name, origin: hostOf((c.redirect_uris || [])[0]), created: c.created || 0 }))
+    .sort((a, b) => (b.created || 0) - (a.created || 0));
+}
+export function removeClient(clientId) { delete state.clients[clientId]; save(); return { ok: true }; }
 export function revokeAgent(clientId) {
   delete state.grants[clientId];
+  delete state.clients[clientId]; // drop the registration too, so it can't linger invisibly
   for (const [t, r] of Object.entries(state.tokens)) if (r.client_id === clientId) delete state.tokens[t];
   for (const [t, r] of Object.entries(state.refresh)) if (r.client_id === clientId) delete state.refresh[t];
   save();
@@ -115,6 +189,7 @@ function decide(reqId, approve) {
     codes.set(code, { client_id: p.client_id, redirect_uri: p.redirect_uri, code_challenge: p.code_challenge, resource: p.resource, exp: now() + CODE_TTL_MS, name: p.client_name });
     p.code = code;
   }
+  pingPending(); // a request left the pending queue → update the badge
   return { ok: true };
 }
 
@@ -124,38 +199,36 @@ export function applyDecision(reqId, approve) {
   const p = pending.get(reqId);
   const r = decide(reqId, approve);
   if (!r.ok) return { ok: false };
-  if (approve && p) { state.grants[p.client_id] = { client_id: p.client_id, name: p.client_name, resource: p.resource, created: now() }; save(); }
+  if (approve && p) createGrant(p);
   return { ok: true, redirect: finalRedirect(p) };
 }
 
 // --- Consent page ------------------------------------------------------------
+// Deliberately minimal. Approval happens in the EXTENSION (the toolbar icon shows
+// a ● badge → open the popup → Approve), not on this page. This tab is just a
+// small waiter that auto-returns to the agent once you approve in the extension
+// (it also completes if you approve from the bridge Config page).
 function consentPage(p) {
-  return `<!doctype html><meta charset=utf-8><title>Authorize agent</title>
-<style>body{font:15px/1.5 -apple-system,system-ui,sans-serif;background:#14161b;color:#e6e8ec;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center}
-.card{background:#1e2128;border:1px solid #2c3038;border-radius:14px;padding:28px;max-width:420px}
-h1{font-size:18px;margin:0 0 6px} .mut{color:#9aa1ac;font-size:13px}
-.who{background:#12141a;border:1px solid #2c3038;border-radius:8px;padding:10px 12px;margin:16px 0;font-family:ui-monospace,Menlo,monospace}
-button{font:14px inherit;border-radius:8px;padding:9px 16px;border:1px solid #2c3038;cursor:pointer;margin-right:8px}
-.ok{background:#2e9e44;border-color:#2e9e44;color:#fff}.no{background:#2a2f38;color:#e6e8ec}
-.wait{color:#9aa1ac;font-size:13px;margin-top:14px}</style>
-<div class=card>
-<h1>Authorize this agent?</h1>
-<div class=mut>An AI agent is requesting permission to drive your browser through the AI Browser Bridge.</div>
+  return `<!doctype html><meta charset=utf-8><title>Approve in the extension</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>body{font:15px/1.6 -apple-system,system-ui,sans-serif;background:#14161b;color:#e6e8ec;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center}
+@media (prefers-color-scheme:light){body{background:#f5f6f8;color:#1b1e24}}
+.b{max-width:380px;padding:24px}.who{font-family:ui-monospace,Menlo,monospace;opacity:.85;margin:8px 0 18px;font-size:14px}
+.s{font-size:13px;opacity:.65;margin-top:14px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#d29922;vertical-align:baseline;margin:0 2px}</style>
+<div class=b>
+<div style="font-size:16px">Approve this connection in the</div>
+<div style="font-size:16px"><b>AI Browser Bridge</b> extension</div>
 <div class=who>${escapeHtml(p.client_name)}</div>
-<div class=mut>Approve here, or from the extension popup. You can revoke it anytime in the popup.</div>
-<form method=POST action="/oauth/decision" style="margin-top:18px">
-  <input type=hidden name=reqId value="${p.reqId}">
-  <button class=ok name=approve value=1>Approve</button>
-  <button class=no name=approve value=0>Deny</button>
-</form>
-<div class=wait id=w></div>
+<div class=s>Look for the <span class=dot></span> on the toolbar icon, open the popup, and tap <b>Approve</b>. You can leave this tab — it returns automatically.</div>
+<div class=s id=w>Waiting for your approval…</div>
+</div>
 <script>
-// If approval happens in the extension popup instead, finish automatically.
 const reqId=${JSON.stringify(p.reqId)};
 setInterval(async()=>{try{const r=await fetch('/oauth/status?reqId='+encodeURIComponent(reqId),{cache:'no-store'});const j=await r.json();
  if(j.redirect){document.getElementById('w').textContent='Approved — returning to the agent…';location.href=j.redirect;}
  else if(j.denied){document.getElementById('w').textContent='Denied.';}}catch{}},1000);
-</script></div>`;
+</script>`;
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -189,7 +262,9 @@ export async function oauthHandle(req, res, url) {
       token_endpoint_auth_method: 'none',
       created: now(),
     };
-    state.clients[client_id] = client; save();
+    state.clients[client_id] = client;
+    gcClients(); // sweep orphaned registrations whenever a new one arrives
+    save();
     json(res, 201, { client_id, client_name: client.client_name, redirect_uris: client.redirect_uris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'] });
     return true;
   }
@@ -213,6 +288,7 @@ export async function oauthHandle(req, res, url) {
       created: now(), decided: false,
     };
     pending.set(reqId, p);
+    pingPending(); // new request → light up the extension badge
     html(res, 200, consentPage(p)); return true;
   }
 
@@ -225,7 +301,7 @@ export async function oauthHandle(req, res, url) {
     const r = decide(reqId, approve);
     if (!r.ok) { json(res, 400, { error: r.error }); return true; }
     // Approve/deny grant record.
-    if (approve && p) { state.grants[p.client_id] = { client_id: p.client_id, name: p.client_name, resource: p.resource, created: now() }; save(); }
+    if (approve && p) createGrant(p);
     // Page form-post → redirect straight back to the agent; popup fetch → JSON.
     const loc = finalRedirect(p);
     const wantsHtml = /text\/html/.test(req.headers.accept || '') && form.reqId;

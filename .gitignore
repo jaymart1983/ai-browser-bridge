@@ -3,8 +3,14 @@ node_modules/
 
 # Runtime secrets and user data - never commit these
 bridge/.bridge-state.json
+bridge/.bridge-state.json.bak
 bridge/bridge.log
 recordings/
 *.log
+*.bak
+
+# App-specific capability modules — their source of truth is their own repo, not
+# this public one. The shipped example module (research.mjs) stays tracked.
+bridge/modules/ai-analyst.mjs
 
 .DS_Store

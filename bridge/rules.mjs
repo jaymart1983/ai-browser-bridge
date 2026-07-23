@@ -26,7 +26,10 @@ const NON_TARGETED = new Set(['browser_tabs_list', 'browser_monitor_list', 'brow
 
 export function toolVerb(toolName) { return TOOL_VERB[toolName] || null; }
 
-// --- Destination registry (maintained by the module loader) ------------------
+// --- Destination registry ----------------------------------------------------
+// Module destinations live in this in-memory Map (registered on enable). User-
+// created destinations live in state.destinations (persisted) and are always
+// available regardless of any module.
 const destinations = new Map(); // destId -> { name, moduleId, patterns[] }
 export function setDestination(id, { name, moduleId, patterns }) {
   destinations.set(id, { name: name || id, moduleId: moduleId || null, patterns: patterns || [] });
@@ -34,8 +37,17 @@ export function setDestination(id, { name, moduleId, patterns }) {
 export function removeDestinationsByModule(moduleId) {
   for (const [id, d] of destinations) if (d.moduleId === moduleId) destinations.delete(id);
 }
+// Resolve a destination id to its patterns (module first, then user). null = unknown.
+function destPatterns(id) {
+  const d = destinations.get(id);
+  if (d) return d.patterns || [];
+  const u = (state.destinations || []).find((x) => x.id === id);
+  return u ? (u.patterns || []) : null;
+}
 export function getDestinations() {
-  return [...destinations.entries()].map(([id, d]) => ({ id, ...d }));
+  const mod = [...destinations.entries()].map(([id, d]) => ({ id, ...d, user: false }));
+  const usr = (state.destinations || []).map((d) => ({ id: d.id, name: d.name, moduleId: null, patterns: d.patterns || [], user: true }));
+  return [...mod, ...usr];
 }
 
 // --- Pattern matching --------------------------------------------------------
@@ -58,22 +70,33 @@ export function matchPattern(pattern, url) {
 }
 
 // --- Evaluation --------------------------------------------------------------
-// Returns { allow, reason }. Only applies to core browser tools (TOOL_VERB);
-// module-provided tools are handled by the caller (allowed when the module is on).
+// Rules are evaluated TOP-DOWN, first match wins. Each rule carries an action
+// (allow | deny); the first rule whose (source, permission, destination) all
+// match decides. Nothing matches → deny-by-default. This lets a deny (or allow)
+// rule placed at the top of the list supersede everything below it.
+// Only applies to core browser tools (TOOL_VERB); module tools are handled by
+// the caller (allowed when the module is on).
 export function evaluate(sourceName, targetUrl, toolName) {
   const verb = TOOL_VERB[toolName];
   if (!verb) return { allow: false, reason: `unknown tool '${toolName}'` };
-  const candidates = (state.rules || []).filter(
-    (r) => r.enabled !== false && (r.source === 'Any Agent' || r.source === sourceName) && (r.permissions || []).includes(verb),
-  );
-  if (!candidates.length) return { allow: false, reason: `no rule grants '${verb}' to '${sourceName}'` };
-  if (NON_TARGETED.has(toolName) || !targetUrl) return { allow: true, reason: `${verb} granted` };
-  for (const r of candidates) {
-    const dest = destinations.get(r.destination);
-    if (!dest) continue;
-    for (const p of dest.patterns) if (matchPattern(p, targetUrl)) return { allow: true, reason: `rule '${r.id}'` };
+  const nonTargeted = NON_TARGETED.has(toolName) || !targetUrl;
+  for (const r of (state.rules || [])) {
+    if (r.enabled === false) continue;
+    if (!(r.source === 'Any Agent' || r.source === sourceName)) continue;
+    if (!(r.permissions || []).includes(verb)) continue;
+    let destMatch;
+    if (nonTargeted) {
+      destMatch = true; // no URL to test — source + permission is enough
+    } else {
+      const patterns = destPatterns(r.destination);
+      if (patterns == null) continue; // destination unknown (e.g. module disabled) → can't match
+      destMatch = patterns.some((p) => matchPattern(p, targetUrl));
+    }
+    if (!destMatch) continue;
+    const deny = r.action === 'deny';
+    return { allow: !deny, reason: `rule '${r.id}' (${deny ? 'deny' : 'allow'})` };
   }
-  return { allow: false, reason: `no allowed destination matches ${targetUrl}` };
+  return { allow: false, reason: nonTargeted ? `no rule grants '${verb}' to '${sourceName}'` : `no rule matches ${targetUrl} for '${verb}'` };
 }
 
 // --- tabId → URL resolution (small cache over relayed tabs.list) -------------
