@@ -357,6 +357,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'WS_STATUS') {
     wsConnected = !!msg.connected;
     if (!wsConnected) pendingAuth = 0; // clear the badge when the bridge drops
+    if (wsConnected) sendIdentity();   // tell the bridge WHICH browser this is
     updateIcon();
     return; // no response needed
   }
@@ -533,6 +534,16 @@ async function startPairing() {
   const { id, name } = await ensureBrowserIdentity();
   sendToOffscreen({ type: 'WS_SEND', frame: { type: 'pair_init', pub: bufToHex(raw), browserId: id, browserName: name } }).catch(() => {});
   return { ok: true };
+}
+
+// Announce WHICH browser we are to the bridge (from the SW, where the id is
+// reliably available), so the bridge maps this socket / migrates a legacy pairing.
+// Sent on every (re)connect.
+async function sendIdentity() {
+  try {
+    const { id, name } = await ensureBrowserIdentity();
+    await sendToOffscreen({ type: 'WS_SEND', frame: { type: 'hello', role: 'extension', version: VERSION, browserId: id, browserName: name } });
+  } catch { /* offscreen not ready; next connect will retry */ }
 }
 
 // Finish pairing: derive the shared key from the bridge's public key.
