@@ -45,9 +45,15 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB (screenshots/HTML can be large)
 // Linked browsers can each hold an open agent socket. Commands are relayed to the
 // ACTIVE browser only; the others stay connected (for status + fast switching).
 const agentSockets = new Map(); // browserId -> ws
+let legacySocket = null; // most-recent socket that hasn't reported a browser id yet
 function activeSocket() {
-  const ws = state.activeBrowser && agentSockets.get(state.activeBrowser);
-  return ws && ws.readyState === ws.OPEN ? ws : null;
+  const mapped = state.activeBrowser && agentSockets.get(state.activeBrowser);
+  if (mapped && mapped.readyState === mapped.OPEN) return mapped;
+  // Backward-compat: a pre-multi-browser extension connects but never sends a
+  // browser id. While a legacy pairing key exists, route to that socket (signed
+  // with the legacy key) so it keeps working until the user reloads the extension.
+  if (state.pairing && state.pairing.key && legacySocket && legacySocket.readyState === legacySocket.OPEN && !legacySocket._browserId) return legacySocket;
+  return null;
 }
 function agentConnected() { return !!activeSocket(); }
 function connectedBrowserIds() {
@@ -389,6 +395,7 @@ configureOAuth({ notifyPending: (n) => broadcastToAgents({ type: 'pending', coun
 
 wss.on('connection', (ws) => {
   log('extension agent connected');
+  legacySocket = ws; // fallback target until (unless) it identifies via hello/pair
   sendToOneAgent(ws, { type: 'pending', count: listPending().length }); // sync the badge on connect
 
   ws.on('message', (data) => {
@@ -442,6 +449,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (ws._browserId && agentSockets.get(ws._browserId) === ws) agentSockets.delete(ws._browserId);
+    if (legacySocket === ws) legacySocket = null;
     // No browser recording anymore if none are connected → reset the tray.
     if (!agentSockets.size) { liveSessions.clear(); trayRefresh(); }
     log('extension agent disconnected', ws._browserId || '');
