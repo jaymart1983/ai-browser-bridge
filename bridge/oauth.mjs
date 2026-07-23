@@ -287,6 +287,15 @@ export async function oauthHandle(req, res, url) {
       stateParam: q.get('state') || '',
       created: now(), decided: false,
     };
+    // Already-approved client re-authorizing (e.g. after a token expiry/loss):
+    // skip consent and hand back a code directly — no NEW approval prompt. The
+    // user already trusts this client_id; PKCE + the registered redirect still gate it.
+    if (state.grants[client.client_id]) {
+      pending.set(reqId, p);
+      decide(reqId, true);   // silent approve (grant already exists)
+      createGrant(p);        // refresh grant metadata, keep original name/created
+      redirect(res, finalRedirect(p)); return true;
+    }
     pending.set(reqId, p);
     pingPending(); // new request → light up the extension badge
     html(res, 200, consentPage(p)); return true;
