@@ -423,6 +423,12 @@ wss.on('connection', (ws) => {
     // we derive the shared HMAC key for THAT browser and return ours.
     if (msg.type === 'pair_init' && typeof msg.pub === 'string') {
       try {
+        // Hands-free auto-pair: when the embedder (AI Analyst) sets BRIDGE_AUTOPAIR_TOKEN, the
+        // extension it launched carries that one-time token in pair_init, so it links without a
+        // manual "Link" click. When the token is set we REQUIRE a match — so only the embedder's
+        // extension can pair, not any loopback extension. Standalone bridges (no env) accept as before.
+        const autopair = process.env.BRIDGE_AUTOPAIR_TOKEN || '';
+        if (autopair && msg.token !== autopair) { log('pair_init rejected (bad/missing autopair token)'); return; }
         const bid = typeof msg.browserId === 'string' && msg.browserId ? msg.browserId : (ws._browserId || null);
         const pub = pairInit(msg.pub, bid, msg.browserName);
         if (bid) { ws._browserId = bid; agentSockets.set(bid, ws); }

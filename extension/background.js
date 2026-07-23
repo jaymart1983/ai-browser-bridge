@@ -357,7 +357,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'WS_STATUS') {
     wsConnected = !!msg.connected;
     if (!wsConnected) pendingAuth = 0; // clear the badge when the bridge drops
-    if (wsConnected) sendIdentity();   // tell the bridge WHICH browser this is
+    if (wsConnected) { sendIdentity(); maybeAutopair(); } // identify + hands-free link (embedder token)
     updateIcon();
     return; // no response needed
   }
@@ -526,14 +526,40 @@ async function verifyFrameMac(cmd) {
   return bufToHex(sig) === cmd.mac;
 }
 
-// Kick off pairing: generate an ECDH keypair, send our public key to the bridge.
+// autopair.json is written into the extension dir by an embedder (AI Analyst) that
+// force-loads this extension; when present, its token lets us pair HANDS-FREE (no "Link"
+// click). undefined = not yet loaded, null = none present, string = the token.
+let autopairToken;
+async function loadAutopairToken() {
+  if (autopairToken !== undefined) return autopairToken;
+  autopairToken = null;
+  try {
+    const r = await fetch(chrome.runtime.getURL('autopair.json'));
+    if (r.ok) { const d = await r.json(); if (d && typeof d.token === 'string' && d.token) autopairToken = d.token; }
+  } catch { /* no embedder token → manual Link only */ }
+  return autopairToken;
+}
+
+// Kick off pairing: generate an ECDH keypair, send our public key to the bridge. Includes the
+// embedder's autopair token when available (required by an embedder-run bridge).
 async function startPairing() {
   const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
   pairEphemeral = kp;
   const raw = await crypto.subtle.exportKey('raw', kp.publicKey);
   const { id, name } = await ensureBrowserIdentity();
-  sendToOffscreen({ type: 'WS_SEND', frame: { type: 'pair_init', pub: bufToHex(raw), browserId: id, browserName: name } }).catch(() => {});
+  const frame = { type: 'pair_init', pub: bufToHex(raw), browserId: id, browserName: name };
+  const tok = await loadAutopairToken();
+  if (tok) frame.token = tok;
+  sendToOffscreen({ type: 'WS_SEND', frame }).catch(() => {});
   return { ok: true };
+}
+
+// After connecting, auto-pair if we have an embedder token and aren't linked yet.
+async function maybeAutopair() {
+  if (await getPairKey()) return;         // already linked
+  if (pairEphemeral) return;              // a handshake is already in flight
+  if (!(await loadAutopairToken())) return; // no token → user must click Link
+  startPairing().catch(() => {});
 }
 
 // Announce WHICH browser we are to the bridge (from the SW, where the id is

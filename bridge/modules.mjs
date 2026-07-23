@@ -41,6 +41,12 @@ export async function loadModules() {
     const mod = registry.get(id);
     if (mod) registerDestinations(mod);
   }
+  // Auto-enable modules named in BRIDGE_AUTOENABLE (embedder-declared, e.g. AI Analyst's own
+  // capability module) so a fresh install has them live without a manual toggle in the UI.
+  const autos = (process.env.BRIDGE_AUTOENABLE || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const id of autos) {
+    if (registry.has(id) && !isEnabled(id)) setEnabled(id, true);
+  }
 }
 
 // Write a new/updated module file and reload. `code` is arbitrary JS that will
