@@ -103,6 +103,9 @@ async function renderAgents() {
     info.className = 'nm';
     info.style.cssText = 'display:flex;flex-direction:column;flex:1;min-width:0';
     const nm = document.createElement('span'); nm.textContent = '✅ ' + a.name;
+    // Recently active (a request in the last 8h) → highlight the agent in blue.
+    const recentlyUsed = a.lastUsed && (Date.now() - a.lastUsed) < 8 * 60 * 60 * 1000;
+    if (recentlyUsed) { nm.style.color = 'var(--accent)'; nm.style.fontWeight = '600'; }
     const sub = document.createElement('span');
     sub.style.cssText = 'font-size:10px;color:#9aa1ac;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     const bits = [];
