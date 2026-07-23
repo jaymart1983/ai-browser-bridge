@@ -287,15 +287,13 @@ export async function oauthHandle(req, res, url) {
       stateParam: q.get('state') || '',
       created: now(), decided: false,
     };
-    // Already-approved client re-authorizing (e.g. after a token expiry/loss):
-    // skip consent and hand back a code directly — no NEW approval prompt. The
-    // user already trusts this client_id; PKCE + the registered redirect still gate it.
-    if (state.grants[client.client_id]) {
-      pending.set(reqId, p);
-      decide(reqId, true);   // silent approve (grant already exists)
-      createGrant(p);        // refresh grant metadata, keep original name/created
-      redirect(res, finalRedirect(p)); return true;
-    }
+    // Consent is ALWAYS required to (re)authorize. This is the anti-masquerade
+    // gate: routine token rotation happens silently via the refresh_token (a
+    // secret only the real client holds), so the authorize/consent flow only runs
+    // when there is NO valid refresh token — i.e. a genuine (re)authorization,
+    // which a human must approve. We deliberately do NOT auto-approve just because
+    // a grant already exists: a local process that merely learned the client_id
+    // would otherwise be able to obtain a token without the user noticing.
     pending.set(reqId, p);
     pingPending(); // new request → light up the extension badge
     html(res, 200, consentPage(p)); return true;
@@ -348,10 +346,16 @@ export async function oauthHandle(req, res, url) {
     if (gt === 'refresh_token') {
       const rec = state.refresh[form.refresh_token];
       if (!rec || !state.grants[rec.client_id]) { json(res, 400, { error: 'invalid_grant' }); return true; }
-      const access = rand(32);
+      // Refresh-token ROTATION (OAuth 2.1 for public clients): the presented
+      // refresh token is single-use — consume it and issue a NEW one. A stolen
+      // refresh token is then usable at most once, and a replay by either party
+      // fails, making theft detectable rather than granting silent perpetual access.
+      delete state.refresh[form.refresh_token];
+      const access = rand(32), newRefresh = rand(32);
       state.tokens[access] = { client_id: rec.client_id, resource: rec.resource, exp: now() + ACCESS_TTL_MS };
+      state.refresh[newRefresh] = { client_id: rec.client_id, resource: rec.resource };
       save();
-      json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: Math.floor(ACCESS_TTL_MS / 1000), scope: 'browser' });
+      json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: Math.floor(ACCESS_TTL_MS / 1000), refresh_token: newRefresh, scope: 'browser' });
       return true;
     }
     json(res, 400, { error: 'unsupported_grant_type' }); return true;
