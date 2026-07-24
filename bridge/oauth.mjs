@@ -199,7 +199,7 @@ export function applyDecision(reqId, approve) {
   const p = pending.get(reqId);
   const r = decide(reqId, approve);
   if (!r.ok) return { ok: false };
-  if (approve && p) createGrant(p);
+  if (approve && p) { createGrant(p); deliverCodeToCallback(p); }
   return { ok: true, redirect: finalRedirect(p) };
 }
 
@@ -238,6 +238,23 @@ function finalRedirect(p) {
   u.searchParams.set('code', p.code);
   if (p.stateParam) u.searchParams.set('state', p.stateParam);
   return u.toString();
+}
+
+// Deliver the authorization code to the client's LOOPBACK callback directly,
+// server-side, so completing the flow does not depend on a browser consent tab
+// staying open and redirecting. Most local MCP clients (mcp-remote, etc.) run a
+// throwaway localhost callback server; hitting it here hands over the code even if
+// the user approved from the extension popup and closed the tab. Loopback only —
+// we never call out to a non-local address. Fire-and-forget; the browser redirect
+// (if the tab is open) still works as a fallback, and the code is single-use.
+function deliverCodeToCallback(p) {
+  try {
+    const loc = finalRedirect(p);
+    if (!loc) return;
+    const u = new URL(loc);
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) return;
+    fetch(loc, { redirect: 'manual' }).catch(() => {});
+  } catch { /* ignore */ }
 }
 
 // --- Main router: returns true if it handled the request ---------------------
@@ -320,8 +337,9 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     const p = pending.get(reqId);
     const r = decide(reqId, approve);
     if (!r.ok) { json(res, 400, { error: r.error }); return true; }
-    // Approve/deny grant record.
-    if (approve && p) createGrant(p);
+    // Approve/deny grant record; deliver the code server-side so the flow completes
+    // even if the consent tab was closed (approval came from the extension popup).
+    if (approve && p) { createGrant(p); deliverCodeToCallback(p); }
     // Page form-post → redirect straight back to the agent; popup fetch → JSON.
     const loc = finalRedirect(p);
     const wantsHtml = /text\/html/.test(req.headers.accept || '') && form.reqId;
