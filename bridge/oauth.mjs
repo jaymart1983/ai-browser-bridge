@@ -254,18 +254,18 @@ export async function oauthHandle(req, res, url) {
   // Dynamic Client Registration (RFC 7591).
   if (req.method === 'POST' && path === '/oauth/register') {
     const { json: body } = await readBody(req);
-    const client_id = 'c_' + rand(12);
-    const client = {
-      client_id,
-      client_name: String(body.client_name || 'Unnamed agent').slice(0, 80),
-      redirect_uris: Array.isArray(body.redirect_uris) ? body.redirect_uris.slice(0, 8) : [],
-      token_endpoint_auth_method: 'none',
-      created: now(),
-    };
-    state.clients[client_id] = client;
-    gcClients(); // sweep orphaned registrations whenever a new one arrives
-    save();
-    json(res, 201, { client_id, client_name: client.client_name, redirect_uris: client.redirect_uris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'] });
+    const client_name = String(body.client_name || 'Unnamed agent').slice(0, 80);
+    const redirect_uris = Array.isArray(body.redirect_uris) ? body.redirect_uris.slice(0, 8) : [];
+    // Dedup identical registrations (same name + same redirect set): return the
+    // EXISTING client instead of minting a new one. A client that re-registers on
+    // every connect (instead of persisting its client_id) would otherwise pile up
+    // dozens of duplicate grants ("Name (2)", "(3)", …).
+    const sig = (n, rs) => n + '\n' + [...rs].sort().join(',');
+    const want = sig(client_name, redirect_uris);
+    const existing = Object.values(state.clients).find((c) => sig(c.client_name, c.redirect_uris || []) === want);
+    const client = existing || { client_id: 'c_' + rand(12), client_name, redirect_uris, token_endpoint_auth_method: 'none', created: now() };
+    if (!existing) { state.clients[client.client_id] = client; gcClients(); save(); }
+    json(res, 201, { client_id: client.client_id, client_name: client.client_name, redirect_uris: client.redirect_uris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'] });
     return true;
   }
 
