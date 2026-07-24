@@ -40,29 +40,35 @@ navigate, control, and record a chosen set of tabs.
 - Google Chrome or another Chromium browser
 - An MCP-capable agent
 
-## Install (one command, no prerequisites)
+## Install (no prerequisites)
 
-You do not need Node or anything else installed. One command downloads the latest
-release into a Browser Bridge folder, fetches a pinned Node runtime, and starts it.
+You do not need Node or anything else installed. The installer downloads the latest
+release, fetches a pinned Node runtime, and starts the bridge.
 
-macOS — installs to ~/Applications/Browser Bridge:
+### Download and double-click (recommended)
 
-```
-curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash
-```
+Grab the installer for your OS from the
+[latest release](https://github.com/jaymart1983/browser-bridge/releases/latest):
 
-Windows (PowerShell) — installs to %LOCALAPPDATA%\Programs\Browser Bridge:
+- **macOS** — download `Install-Browser-Bridge-macOS-*.zip`. It expands to a single
+  file, **`Install Browser Bridge.command`**. **Right-click it → Open** (macOS asks
+  once because the app isn't from an identified developer — click Open). It installs
+  everything to `~/Applications/Browser Bridge` and starts the bridge.
+- **Windows** — download `Install-Browser-Bridge-Windows-*.cmd` and double-click it
+  (if SmartScreen warns, click "More info" → "Run anyway"). It installs to
+  `%LOCALAPPDATA%\Programs\Browser Bridge`.
 
-```
-irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex
-```
+Then load the extension (one time): open `chrome://extensions`, turn on Developer
+mode, click Load unpacked, and select the `extension` folder inside the install
+directory (the installer opens it for you). Click **Link** in the extension popup.
 
-Then load the extension (one time): open chrome://extensions, turn on Developer
-mode, click Load unpacked, and select the extension folder inside the install
-directory (the installer opens it for you). Click Link in the extension popup.
+To start or stop the bridge later, double-click **Start Browser Bridge** or
+**Stop Browser Bridge** in the install folder.
 
-To start/stop later, double-click "Start Browser Bridge" or "Stop Browser Bridge"
-in the install folder.
+### Or one command in a terminal
+
+- macOS: `curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash`
+- Windows: `irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex`
 
 ## Setup from source (developers)
 
