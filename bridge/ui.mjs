@@ -7,6 +7,14 @@ import { PERMISSIONS } from './rules.mjs';
 import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, uploadModule, deleteModule } from './modules.mjs';
 import { listAgents, listPending, listStale, revokeAgent, removeClient, applyDecision } from './oauth.mjs';
 import { pairingStatus } from './pairing.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+// Bridge version (from bridge/package.json) — shown in the nav so it's clear this
+// is the BRIDGE's version, distinct from the browser extension's version.
+export let BRIDGE_VERSION = '';
+try { BRIDGE_VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8')).version || ''; } catch {}
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -84,7 +92,7 @@ label.chk{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-
 .tabrow .tab{padding:8px 14px;color:var(--mut);text-decoration:none;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-1px}
 .tabrow .tab:hover{color:var(--fg)} .tabrow .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
 </style>
-<aside><div class="brand">AI Browser Bridge</div><div class="navh">Bridge</div>${bridgeNav().map(item).join('')}${modSection}</aside>
+<aside><div class="brand">AI Browser Bridge${BRIDGE_VERSION ? ` <span style="font-weight:400;color:var(--mut);font-size:11px">v${esc(BRIDGE_VERSION)}</span>` : ''}</div><div class="navh">Bridge</div>${bridgeNav().map(item).join('')}${modSection}</aside>
 <main>${body}</main>`;
 }
 
@@ -94,7 +102,8 @@ export function moduleShell(mod, { tabs = [], active = '', header = '', body = '
   const tabRow = tabs.length > 1
     ? `<div class="tabrow">${tabs.map((t) => `<a class="tab${active === t.id ? ' on' : ''}" href="/modules/${esc(mod.id)}?tab=${esc(t.id)}">${esc(t.label)}</a>`).join('')}</div>`
     : '';
-  const head = `<div class="modhead"><h1>${esc(mod.name)}</h1>${header ? `<div class="mut" style="font-size:13px;margin-top:3px">${header}</div>` : ''}</div>${tabRow}`;
+  const ver = mod.version ? ` <span style="font-weight:400;color:var(--mut);font-size:12px">v${esc(mod.version)}</span>` : '';
+  const head = `<div class="modhead"><h1>${esc(mod.name)}${ver}</h1>${header ? `<div class="mut" style="font-size:13px;margin-top:3px">${header}</div>` : ''}</div>${tabRow}`;
   return uiChrome(mod.name, head + body, '/modules/' + mod.id);
 }
 

@@ -22,7 +22,8 @@ async function refresh() {
   try { s = await send('getState'); } catch { $('wsText').textContent = 'Service worker unavailable'; return; }
   if (!s) return;
 
-  $('version').textContent = 'v' + (s.version || '');
+  $('version').textContent = 'extension v' + (s.version || '');
+  $('version').title = 'Extension version. The bridge shows its own version in the control panel.';
   $('runDot').className = 'dot ok';
   $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
   $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
@@ -39,9 +40,11 @@ async function refresh() {
   try { host = new URL(dashboardUrl).host; } catch {}
   const isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
   const place = isLoopback ? 'this device' : host;
-  $('bridgeMeta').textContent = !s.wsConnected ? '○ Local bridge — not running'
+  $('bridgeMeta').textContent = s.pairError ? '⚠ ' + s.pairError
+    : !s.wsConnected ? '○ Local bridge — not running'
     : paired ? `🔒 Linked · local bridge on ${place} (${host})`
       : `🖥 Local bridge on ${place} (${host}) — loopback only`;
+  $('bridgeMeta').style.color = s.pairError ? 'var(--bad)' : '';
   $('bridgeMeta').title = `A helper on your own computer at ${host}. Traffic stays on this device (loopback). Linking pairs this browser to it with a one-time key exchange.`;
 
   $('agentsSection').classList.toggle('hidden', !s.wsConnected);
@@ -67,18 +70,39 @@ async function renderAgents() {
     $('bridgeMeta').textContent = base + ' · linked ' + when;
     $('bridgeMeta').title = 'Linked ' + d.toLocaleString();
   }
-  // "This browser" active-state + Use button (multi-browser routing).
+  // Linked-browsers list — show ALL of them; the browser viewing this popup is
+  // marked "(this browser)". Names come from the bridge, so renames appear here.
   const browsers = data.browsers || [];
-  const isActive = !!(myBrowserId && data.activeBrowser && data.activeBrowser === myBrowserId);
-  const tbRow = $('thisBrowserRow');
-  if (tbRow) {
-    const show = bridgePaired && !!myBrowserId;
-    tbRow.classList.toggle('hidden', !show);
-    if (show) {
-      $('thisBrowser').textContent = (isActive ? '✅ ' : '○ ') + myBrowserName + (isActive ? ' — active' : ' — inactive')
-        + (browsers.length > 1 ? ' · ' + browsers.length + ' linked' : '');
-      $('thisBrowser').style.color = isActive ? 'var(--ok)' : 'var(--mut)';
-      $('useBtn').classList.toggle('hidden', isActive);
+  const bSec = $('browsersSection'), bList = $('browserList');
+  if (bSec && bList) {
+    bSec.classList.toggle('hidden', !(bridgePaired && browsers.length));
+    bList.innerHTML = '';
+    for (const b of browsers) {
+      const mine = b.id === myBrowserId;
+      const row = document.createElement('div'); row.className = 'agent';
+      const info = document.createElement('div');
+      info.style.cssText = 'display:flex;flex-direction:column;flex:1;min-width:0';
+      const nm = document.createElement('span');
+      nm.textContent = (b.active ? '● ' : '○ ') + (b.name || 'Browser') + (mine ? ' (this browser)' : '');
+      nm.style.color = b.active ? 'var(--ok)' : (mine ? 'var(--accent)' : 'var(--fg)');
+      nm.style.fontWeight = (mine || b.active) ? '600' : '400';
+      const sub = document.createElement('span');
+      sub.style.cssText = 'font-size:10px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      sub.textContent = (b.active ? 'active · ' : '') + (b.connected ? 'connected' : 'offline');
+      info.append(nm, sub);
+      row.append(info);
+      if (!b.active) {
+        const use = document.createElement('button');
+        use.className = mine ? 'primary' : '';
+        use.textContent = mine ? 'Use this browser' : 'Use';
+        use.title = 'Route agent traffic to ' + (b.name || 'this browser');
+        use.onclick = async () => {
+          try { await fetch(bridgeBase() + '/bridge/activate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browserId: b.id }) }); } catch {}
+          renderAgents();
+        };
+        row.append(use);
+      }
+      bList.appendChild(row);
     }
   }
 
@@ -159,12 +183,7 @@ async function renderNav() {
   }
 }
 
-// ---- events ----
-$('useBtn').addEventListener('click', async () => {
-  if (!myBrowserId) return;
-  try { await fetch(bridgeBase() + '/bridge/activate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browserId: myBrowserId }) }); } catch {}
-  renderAgents();
-});
+// ---- events ---- (per-browser "Use" buttons are wired in renderAgents)
 $('openDash').addEventListener('click', () => { if (!$('openDash').disabled) chrome.tabs.create({ url: bridgeBase() + '/config' }); });
 $('linkBtn').addEventListener('click', async () => {
   const s = await send('getState');

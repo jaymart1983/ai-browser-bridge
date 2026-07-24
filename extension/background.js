@@ -42,6 +42,7 @@ const KEEPALIVE_PERIOD_MIN = 25 / 60;
 // Storage keys. Tab policy (allow/storage) is bridge-owned (rule engine); the
 // extension keeps only the pairing key + the browser primitives.
 const K_PAIR_KEY = 'pairKeyHex'; // ECDH-derived HMAC key (hex) shared with the bridge
+const K_PAIR_EPHEMERAL = 'pairEphemeralJwk'; // in-flight ECDH private key, so the handshake survives SW suspension
 const K_BRIDGE_URL = 'bridgeUrl'; // string
 const K_BROWSER_ID = 'browserId'; // stable per-install id so the bridge can tell browsers apart
 const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge / …)
@@ -511,6 +512,7 @@ class CmdError extends Error {
 // ---------------------------------------------------------------------------
 let pairKeyHex = null;   // cached derived key
 let pairEphemeral = null; // ECDH keypair held during an in-flight handshake
+let pairError = ''; // last pairing failure reason, surfaced to the popup
 
 async function getPairKey() {
   if (pairKeyHex) return pairKeyHex;
@@ -553,8 +555,14 @@ async function loadAutopairToken() {
 // Kick off pairing: generate an ECDH keypair, send our public key to the bridge. Includes the
 // embedder's autopair token when available (required by an embedder-run bridge).
 async function startPairing() {
-  const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+  pairError = '';
+  // Extractable so we can stash the private key: MV3 service workers get suspended,
+  // and if that happens between pair_init and pair_ack an in-memory key would be
+  // lost and the handshake would silently fail (seen on aggressive enterprise
+  // browsers). We persist it briefly and delete it as soon as pairing finishes.
+  const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
   pairEphemeral = kp;
+  try { await setLocal({ [K_PAIR_EPHEMERAL]: await crypto.subtle.exportKey('jwk', kp.privateKey) }); } catch {}
   const raw = await crypto.subtle.exportKey('raw', kp.publicKey);
   const { id, name } = await ensureBrowserIdentity();
   const frame = { type: 'pair_init', pub: bufToHex(raw), browserId: id, browserName: name };
@@ -584,17 +592,29 @@ async function sendIdentity() {
 
 // Finish pairing: derive the shared key from the bridge's public key.
 async function finishPairing(bridgePubHex) {
-  if (!pairEphemeral) return;
-  const bridgePub = await crypto.subtle.importKey('raw', hexToBuf(bridgePubHex), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
-  const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: bridgePub }, pairEphemeral.privateKey, 256);
-  const keyBuf = await crypto.subtle.digest('SHA-256', bits);
-  pairKeyHex = bufToHex(keyBuf);
-  await setLocal({ [K_PAIR_KEY]: pairKeyHex });
-  pairEphemeral = null;
-  updateIcon();
+  let priv = pairEphemeral && pairEphemeral.privateKey;
+  if (!priv) {
+    // SW was suspended mid-handshake — recover the ephemeral we stashed.
+    try { const jwk = await getLocal(K_PAIR_EPHEMERAL, null); if (jwk) priv = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']); } catch {}
+  }
+  if (!priv) { pairError = 'Lost the handshake (service worker restarted). Click Link again.'; updateIcon(); return; }
+  try {
+    const bridgePub = await crypto.subtle.importKey('raw', hexToBuf(bridgePubHex), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: bridgePub }, priv, 256);
+    const keyBuf = await crypto.subtle.digest('SHA-256', bits);
+    pairKeyHex = bufToHex(keyBuf);
+    await setLocal({ [K_PAIR_KEY]: pairKeyHex });
+    pairError = '';
+  } catch (e) {
+    pairError = 'Pairing failed: ' + ((e && e.message) || e);
+  } finally {
+    pairEphemeral = null;
+    try { await chrome.storage.local.remove(K_PAIR_EPHEMERAL); } catch {}
+    updateIcon();
+  }
 }
 
-async function clearPairing() { pairKeyHex = null; pairEphemeral = null; await chrome.storage.local.remove(K_PAIR_KEY); }
+async function clearPairing() { pairKeyHex = null; pairEphemeral = null; pairError = ''; await chrome.storage.local.remove([K_PAIR_KEY, K_PAIR_EPHEMERAL]); }
 
 // Authorize a command. The ONLY trust anchor is the Link pairing: the bridge
 // signs every relayed frame with the shared HMAC key and we verify it. If this
@@ -1059,6 +1079,7 @@ async function handlePopup(msg) {
         paired: !!(await getPairKey()),
         browserId: ident.id,
         browserName: ident.name,
+        pairError,
       };
     }
 
