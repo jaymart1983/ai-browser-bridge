@@ -55,6 +55,18 @@ export function touchBrowser(browserId, name) {
   return false;
 }
 
+// Set a friendly label for a linked browser. Indistinguishable Chromium forks (Island,
+// Arc, plain Chromium) all report the UA name "Chrome", so let the user relabel one to
+// tell them apart. Returns { ok, name } or { ok:false, error }.
+export function renameBrowser(browserId, name) {
+  const b = state.browsers[browserId];
+  if (!b) return { ok: false, error: 'unknown browser' };
+  const clean = String(name || '').trim().slice(0, 40);
+  if (!clean) return { ok: false, error: 'name required' };
+  b.name = clean; save();
+  return { ok: true, name: clean };
+}
+
 // Migrate a legacy single pairing onto the browserId the (already-linked) extension
 // now reports — so it keeps working WITHOUT re-linking. Retires the legacy slot.
 export function adoptLegacyForBrowser(browserId, name) {

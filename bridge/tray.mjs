@@ -81,16 +81,37 @@ function installTrayGuard() {
   });
 }
 
-// Make the extracted helper binary executable (systray2 sometimes leaves it 0644).
+// Make the tray helper binary executable. When AI Analyst bundles the bridge, the
+// helper is embedded via go:embed and re-extracted with os.WriteFile → mode 0644
+// (embed.FS carries no exec bit), so systray2 would copy a NON-executable binary
+// and the spawn would fail. Fix the bit on BOTH the vendored traybin (what the
+// bundle ships, resolved next to the systray2 package) and the legacy ~/.cache
+// path (older node-systray layout). Best effort — never fatal.
 async function ensureBinExecutable() {
+  const bin = process.platform === 'darwin' ? 'tray_darwin_release'
+    : process.platform === 'win32' ? 'tray_windows_release.exe' : 'tray_linux_release';
   try {
     const { chmodSync, existsSync } = await import('node:fs');
     const os = await import('node:os');
-    const { join } = await import('node:path');
-    const p = join(os.homedir(), '.cache', 'node-systray', '2.1.4',
-      process.platform === 'darwin' ? 'tray_darwin_release'
-      : process.platform === 'win32' ? 'tray_windows_release.exe' : 'tray_linux_release');
-    if (existsSync(p)) chmodSync(p, 0o755);
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const { createRequire } = await import('node:module');
+    const cands = [];
+    // 1) vendored traybin, resolved next to the systray2 package (the bundle path).
+    try {
+      const require = createRequire(import.meta.url);
+      const sysPkg = require.resolve('systray2/package.json');
+      cands.push(join(dirname(sysPkg), 'traybin', bin));
+    } catch { /* not resolvable → fall through */ }
+    // 2) relative to the bridge dir (cwd = layout.Bridge when spawned by AI Analyst).
+    cands.push(join(process.cwd(), 'node_modules', 'systray2', 'traybin', bin));
+    // 3) relative to this module (dev / alternate cwd).
+    try { cands.push(join(dirname(fileURLToPath(import.meta.url)), 'node_modules', 'systray2', 'traybin', bin)); } catch {}
+    // 4) legacy node-systray cache layout.
+    cands.push(join(os.homedir(), '.cache', 'node-systray', '2.1.4', bin));
+    for (const p of cands) {
+      try { if (existsSync(p)) chmodSync(p, 0o755); } catch { /* keep trying */ }
+    }
   } catch { /* best effort */ }
 }
 

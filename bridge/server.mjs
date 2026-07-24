@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle } from './mcp.mjs';
-import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, touchBrowser, adoptLegacyForBrowser } from './pairing.mjs';
+import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -216,6 +216,9 @@ const server = http.createServer((req, res) => {
   // Choose which linked browser receives relayed commands ("use THIS browser").
   if (req.method === 'POST' && url.pathname === '/bridge/activate') {
     return readJsonBody(req).then((b) => { const r = b && b.browserId ? setActiveBrowser(String(b.browserId)) : { ok: false, error: 'browserId required' }; notifyActive(); return sendJson(res, 200, r); });
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/rename') {
+    return readJsonBody(req).then((b) => sendJson(res, 200, b && b.browserId ? renameBrowser(String(b.browserId), b.name) : { ok: false, error: 'browserId required' }));
   }
 
   if (url.pathname === COMMAND_PATH) {

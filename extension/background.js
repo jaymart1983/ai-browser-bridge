@@ -46,14 +46,24 @@ const K_BRIDGE_URL = 'bridgeUrl'; // string
 const K_BROWSER_ID = 'browserId'; // stable per-install id so the bridge can tell browsers apart
 const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge / …)
 
-// Best-effort browser name for the linked-browsers list in the bridge.
+// Best-effort browser name for the linked-browsers list in the bridge. Specific
+// Chromium forks are matched before the generic "Chrome" fallback. NOTE: some forks
+// (Arc, Island, plain Chromium builds) don't always alter the UA and can still fall
+// through to "Chrome"/"Chromium" — the user can relabel a linked browser in AI Analyst
+// (or the bridge dashboard) to tell them apart.
 function detectBrowserName() {
   try {
     const ua = (self.navigator && navigator.userAgent) || '';
     if (self.navigator && navigator.brave) return 'Brave';
-    if (/\bEdg\//.test(ua)) return 'Edge';
-    if (/\bOPR\//.test(ua)) return 'Opera';
+    if (/\bEdg(A|iOS)?\//.test(ua)) return 'Edge';
+    if (/\bOPR\/|\bOpera\//.test(ua)) return 'Opera';
     if (/\bVivaldi/.test(ua)) return 'Vivaldi';
+    if (/\bYaBrowser\//.test(ua)) return 'Yandex';
+    if (/\bIsland\//i.test(ua)) return 'Island';
+    if (/\bDuckDuckGo\//i.test(ua)) return 'DuckDuckGo';
+    if (/\bArc\//.test(ua)) return 'Arc';
+    if (/\bHeadlessChrome\//.test(ua)) return 'Chrome (headless)';
+    if (/\bChromium\//.test(ua)) return 'Chromium';
     if (/\bChrome\//.test(ua)) return 'Chrome';
     return 'Browser';
   } catch { return 'Browser'; }

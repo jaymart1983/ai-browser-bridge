@@ -153,9 +153,11 @@ function configPage() {
             +'<span class="grow"><b>'+esc(b.name)+'</b> '+(b.active?'<span class="tag on">active</span>':'')
             +' <span class="mut" style="font-size:11px">'+(b.connected?'connected':'offline')+'</span></span>'
             +(b.active?'':'<button data-use="'+esc(b.id)+'" class="primary">Use this browser</button>')
+            +'<button data-ren="'+esc(b.id)+'" data-name="'+esc(b.name||'')+'">Rename</button>'
             +'<button data-unlink="'+esc(b.id)+'" class="bad">Unlink</button></div>';
         }).join('');
         box.querySelectorAll('[data-use]').forEach(function(el){el.onclick=async function(){await fetch('/bridge/activate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({browserId:el.getAttribute('data-use')})});load();};});
+        box.querySelectorAll('[data-ren]').forEach(function(el){el.onclick=async function(){var n=prompt('Label for this browser (e.g. Island, Work Edge):',el.getAttribute('data-name')||'');if(n==null||!n.trim())return;await fetch('/bridge/rename',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({browserId:el.getAttribute('data-ren'),name:n.trim()})});load();};});
         box.querySelectorAll('[data-unlink]').forEach(function(el){el.onclick=async function(){if(!confirm('Unlink this browser? It loses access until re-linked.'))return;await fetch('/bridge/unpair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({browserId:el.getAttribute('data-unlink')})});load();};});
       }
       load(); setInterval(load,3000);
