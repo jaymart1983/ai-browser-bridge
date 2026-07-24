@@ -213,6 +213,7 @@ function activityBody(url, ctx, h) {
   const sessions = ctx.monitor.listSessions();
   const sel = sessions.find((s) => s.id === url.searchParams.get('session')) || null;
   const fmtBytes = (n) => { n = Number(n) || 0; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(0) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; };
+  const fmtTime = (ts) => { if (!ts) return ''; try { const d = new Date(ts); return d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }) + ' ' + d.toLocaleTimeString(); } catch { return ''; } };
   const list = sessions.length ? sessions.map((s) => {
     const label = s.title || s.url || ('tab ' + (s.tabId ?? '?'));
     const fav = s.favIconUrl ? `<img src="${h.esc(s.favIconUrl)}" style="width:14px;height:14px;border-radius:3px" onerror="this.style.display='none'">` : '';
@@ -231,7 +232,7 @@ function activityBody(url, ctx, h) {
       const badges = eventBadges(ev).map((b) => `<span class="tag">${h.esc(b)}</span>`).join(' ');
       const n = ev.kind === 'screenshot' ? shotNum(ev.file) : null;
       const shot = n ? `<img class="shot" loading=lazy src="/monitor/shot?key=${encodeURIComponent(sel.name)}&root=${encodeURIComponent(sel.root)}&n=${n}">` : '';
-      return `<div class="ev"><div style="width:20px">${ico}</div><div style="flex:1;min-width:0"><div style="word-break:break-all;font-size:12px">${h.esc(main)}</div>${badges ? `<div style="margin-top:3px">${badges}</div>` : ''}${shot}</div></div>`;
+      return `<div class="ev"><div style="width:20px">${ico}</div><div style="flex:1;min-width:0"><div style="word-break:break-all;font-size:12px">${h.esc(main)}</div><div class="mut" style="font-size:11px">${fmtTime(ev.ts)}${ev.kind ? ' · ' + h.esc(ev.kind) : ''}</div>${badges ? `<div style="margin-top:3px">${badges}</div>` : ''}${shot}</div></div>`;
     }).join('');
     feed = `<div class="row" style="margin-bottom:8px"><b style="flex:1">${h.esc(sel.title || sel.name)}</b>
       <form method=POST style="display:inline"><input type=hidden name=action value=movesession><input type=hidden name=sid value="${h.esc(sel.id)}"><button>Move → ${sel.root === 'perm' ? 'Tmp' : 'Perm'}</button></form>
