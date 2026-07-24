@@ -56,7 +56,7 @@ let state = 'idle';
 function menuFor(s) {
   return {
     icon: ICONS[s], isTemplateIcon: false, title: '',
-    tooltip: 'AI Browser Bridge' + (s === 'recording' ? ' — recording' : ''),
+    tooltip: 'Browser Bridge' + (s === 'recording' ? ' — recording' : ''),
     items: [
       { title: 'Open Dashboard', tooltip: 'Recordings / activity', checked: false, enabled: true },
       { title: 'Modules', tooltip: 'Enable/disable capability modules', checked: false, enabled: true },

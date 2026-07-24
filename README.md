@@ -1,4 +1,4 @@
-# AI Browser Bridge
+# Browser Bridge
 
 A local bridge plus a browser extension that lets AI agents drive your real,
 logged-in browser under rules you control. It runs entirely on your machine

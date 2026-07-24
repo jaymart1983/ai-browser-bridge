@@ -51,7 +51,7 @@ export function uiChrome(title, body, active = '') {
   const item = (l) => `<a href="${esc(l.href)}"${active === l.href ? ' class="on"' : ''}>${esc(l.label)}</a>`;
   const modItems = moduleNav();
   const modSection = modItems.length ? `<div class="navh">Modules</div>${modItems.map(item).join('')}` : '';
-  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(title)} — AI Browser Bridge</title>
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(title)} — Browser Bridge</title>
 <link rel="icon" href="${FAVICON}">
 <style>
 :root{--bg:#14161b;--card:#1e2128;--fg:#e6e8ec;--mut:#9aa1ac;--line:#2c3038;--ok:#2e9e44;--bad:#e5484d;--accent:#3b82f6;--warn:#d29922;
@@ -92,7 +92,7 @@ label.chk{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-
 .tabrow .tab{padding:8px 14px;color:var(--mut);text-decoration:none;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-1px}
 .tabrow .tab:hover{color:var(--fg)} .tabrow .tab.on{color:var(--fg);border-bottom-color:var(--accent)}
 </style>
-<aside><div class="brand">AI Browser Bridge${BRIDGE_VERSION ? ` <span style="font-weight:400;color:var(--mut);font-size:11px">v${esc(BRIDGE_VERSION)}</span>` : ''}</div><div class="navh">Bridge</div>${bridgeNav().map(item).join('')}${modSection}</aside>
+<aside><div class="brand">Browser Bridge${BRIDGE_VERSION ? ` <span style="font-weight:400;color:var(--mut);font-size:11px">v${esc(BRIDGE_VERSION)}</span>` : ''}</div><div class="navh">Bridge</div>${bridgeNav().map(item).join('')}${modSection}</aside>
 <main>${body}</main>`;
 }
 

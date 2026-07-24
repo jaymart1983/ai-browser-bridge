@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "AI Browser Bridge",
+  "name": "Browser Bridge",
   "version": "0.1.0",
   "description": "Pairs your browser with a local bridge so AI/MCP agents can drive it under rules you control. Loopback only - nothing leaves your device.",
   "permissions": [
@@ -26,7 +26,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "AI Browser Bridge",
+    "default_title": "Browser Bridge",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

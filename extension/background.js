@@ -212,7 +212,7 @@ function updateIcon() {
     const n = monitored.size;
     chrome.action
       .setTitle({
-        title: `AI Browser Bridge — ${wsConnected ? 'bridge connected' : 'bridge OFF'}` +
+        title: `Browser Bridge — ${wsConnected ? 'bridge connected' : 'bridge OFF'}` +
           (pendingAuth ? ` · ${pendingAuth} agent${pendingAuth === 1 ? '' : 's'} awaiting approval` : '') +
           (n ? ` · recording ${n} tab${n === 1 ? '' : 's'}` : ''),
       })

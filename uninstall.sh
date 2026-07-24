@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove the AI Browser Bridge login agent (stops auto-start and the running bridge).
+# Remove the Browser Bridge login agent (stops auto-start and the running bridge).
 set -e
 LABEL="com.aibrowserbridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

@@ -218,7 +218,7 @@ function consentPage(p) {
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#d29922;vertical-align:baseline;margin:0 2px}</style>
 <div class=b>
 <div style="font-size:16px">Approve this connection in the</div>
-<div style="font-size:16px"><b>AI Browser Bridge</b> extension</div>
+<div style="font-size:16px"><b>Browser Bridge</b> extension</div>
 <div class=who>${escapeHtml(p.client_name)}</div>
 <div class=s>Look for the <span class=dot></span> on the toolbar icon, open the popup, and tap <b>Approve</b>. You can leave this tab — it returns automatically.</div>
 <div class=s id=w>Waiting for your approval…</div>

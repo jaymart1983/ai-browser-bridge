@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup: run the AI Browser Bridge as a background login agent so it's
+# One-time setup: run the Browser Bridge as a background login agent so it's
 # always up (starts at login, restarts if it crashes). After this, you never
 # manually start it — just load the extension and it connects.
 #
