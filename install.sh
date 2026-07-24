@@ -54,5 +54,20 @@ if curl -s http://127.0.0.1:8787/health >/dev/null 2>&1; then
 else
   echo "⚠️  Installed, but health check didn't respond yet. Check $BRIDGE/bridge.log"
 fi
+
+# Recommended home is ~/Applications/Browser Bridge (a visible, easy-to-reach user
+# app folder). Nudge if running from a scratch location like Downloads/Documents.
+case "$DIR" in
+  "$HOME/Downloads"/*|"$HOME/Documents"/*|"$HOME/Desktop"/*)
+    echo ""
+    echo "ℹ️  Tip: this is installed from $DIR."
+    echo "    For a cleaner home, move the folder to ~/Applications/Browser Bridge and re-run ./install.sh."
+    ;;
+esac
+
+echo ""
 echo "   Dashboard: http://127.0.0.1:8787/"
-echo "   Next: load the extension folder in chrome://extensions (Load unpacked → $DIR/extension)"
+echo "   Next: load the extension in chrome://extensions → Load unpacked → select:"
+echo "     $DIR/extension"
+# Open the extension folder in Finder so 'Load unpacked' is a drag/paste, not a hunt.
+open "$DIR/extension" 2>/dev/null || true
