@@ -133,6 +133,10 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'ai-browser-bridge',
+      // An embedder (AI Analyst) stamps the bundle version it shipped via BRIDGE_BUNDLE_VERSION.
+      // A standalone bridge (or an older bundle that predates this field) reports null, which the
+      // embedder treats as "not my bundled bridge / unknown version".
+      version: process.env.BRIDGE_BUNDLE_VERSION || null,
       agentConnected: agentConnected(),
       commandPath: COMMAND_PATH,
       agentPath: AGENT_PATH,
