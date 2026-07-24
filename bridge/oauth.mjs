@@ -274,7 +274,20 @@ export async function oauthHandle(req, res, url) {
     const q = url.searchParams;
     const client = state.clients[q.get('client_id')];
     const redirect_uri = q.get('redirect_uri');
-    if (!client) { html(res, 400, 'unknown client_id'); return true; }
+    if (!client) {
+      // The client presented a client_id the bridge doesn't know — usually a stale
+      // cache after the client's registration was removed here. Tell the human how
+      // to recover instead of a bare error, since the agent can't self-explain.
+      html(res, 400, `<!doctype html><meta charset=utf-8><title>Client not registered</title>
+<style>body{font:15px/1.6 -apple-system,system-ui,sans-serif;background:#14161b;color:#e6e8ec;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center}
+@media (prefers-color-scheme:light){body{background:#f5f6f8;color:#1b1e24}}.b{max-width:440px;padding:24px}
+code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</style>
+<div class=b><div style="font-size:17px"><b>This agent isn't registered here</b></div>
+<div class=s>Your MCP client is using a saved registration the bridge no longer has (its client was removed). It needs to register again.</div>
+<div class=s>Clear the client's auth cache and reconnect. For <b>mcp-remote</b> (Claude Desktop): quit it, delete <code>~/.mcp-auth</code>, and reopen — it will register fresh and you'll get a normal approval prompt.</div>
+<div class=s style="opacity:.5">client_id ${escapeHtml(q.get('client_id') || '')}</div></div>`);
+      return true;
+    }
     if (client.redirect_uris.length && redirect_uri && !client.redirect_uris.includes(redirect_uri)) { html(res, 400, 'redirect_uri not registered'); return true; }
     if (q.get('response_type') !== 'code') { html(res, 400, 'response_type must be code'); return true; }
     if (q.get('code_challenge_method') !== 'S256' || !q.get('code_challenge')) { html(res, 400, 'PKCE S256 required'); return true; }
