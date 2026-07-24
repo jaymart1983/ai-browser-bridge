@@ -45,15 +45,13 @@ for (const rel of tracked) {
   copyFileSync(src, dst);
 }
 
-// Bundle runtime deps. ws (pure JS) is required. systray2 carries per-platform tray
-// binaries (tray_darwin_release / tray_windows_release.exe / …) so it's safe to
-// bundle everywhere — each OS loads its own, and tray.mjs is defensive if absent.
-mkdirSync(join(STAGE, 'bridge', 'node_modules'), { recursive: true });
-for (const dep of ['ws', 'systray2']) {
-  const src = join(ROOT, 'bridge', 'node_modules', dep);
-  if (!existsSync(src)) { console.error(`${dep} not installed — run \`npm install\` in bridge/ first.`); process.exit(1); }
-  cpSync(src, join(STAGE, 'bridge', 'node_modules', dep), { recursive: true });
-}
+// Bundle the WHOLE bridge/node_modules — the deps (ws, systray2 + its fs-extra
+// chain) are pure JS, and systray2 carries per-platform tray binaries, so the same
+// bundle runs on any OS. Cherry-picking top-level deps misses transitive ones
+// (systray2 → fs-extra), which silently disables the tray.
+const nm = join(ROOT, 'bridge', 'node_modules');
+if (!existsSync(join(nm, 'ws')) || !existsSync(join(nm, 'systray2'))) { console.error('deps missing — run `npm install` in bridge/ first.'); process.exit(1); }
+cpSync(nm, join(STAGE, 'bridge', 'node_modules'), { recursive: true, filter: (s) => !s.includes('/.cache') && !s.endsWith('/.bin') });
 
 // Zip per OS (identical payload; per-OS names make the right download obvious).
 mkdirSync(DIST, { recursive: true });
