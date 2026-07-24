@@ -14,3 +14,6 @@ recordings/
 bridge/modules/ai-analyst.mjs
 
 .DS_Store
+
+# Release build artifacts
+dist/
