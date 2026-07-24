@@ -8,7 +8,7 @@ import { evaluate, toolVerb, resolveTabUrl } from './rules.mjs';
 import { allModuleTools, getModuleCtx } from './modules.mjs';
 
 const PROTOCOL_DEFAULT = '2025-06-18';
-const SERVER_INFO = { name: 'ai-browser-bridge', version: '0.2.0' };
+const SERVER_INFO = { name: 'browser-bridge', version: '0.2.0' };
 
 // tool name -> { description, inputSchema, method (bridge command), map(args)->params }
 const TOOLS = {

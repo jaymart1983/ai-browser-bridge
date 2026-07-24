@@ -50,7 +50,7 @@ the installer downloads the PINNED Node runtime (from `runtime.json`) into
 the update repo:
 
 ```json
-{ "node": "22.14.0", "repo": "jaymart1983/ai-browser-bridge" }
+{ "node": "22.14.0", "repo": "jaymart1983/browser-bridge" }
 ```
 
 - Installers (`install.sh` / `install.ps1`) fetch `node-v<node>` for the platform,
@@ -144,9 +144,10 @@ install.sh / .ps1     per-OS installers
 ## Cross-platform status
 
 - **macOS:** fully supported (launchd service, tray, self-update).
-- **Windows:** the bridge is plain Node and runs; `install.ps1` provides a logon
-  Scheduled Task. No tray (systray2 is macOS-only here), and git self-update needs
-  git present. Zip installs update by re-downloading. Not yet exercised on a
-  Windows host — treat `install.ps1` as the reference implementation to validate.
-- **Bundling Node itself** (so Node is not even a prerequisite) is a possible future
-  step via Node SEA or `pkg`; not done today.
+- **Windows:** the bridge is plain Node and runs; `install.ps1` registers a logon
+  Scheduled Task and `run-bridge.cmd` launches it (swapping a staged runtime update
+  first). No tray (systray2 is macOS-only here). Not yet exercised on a Windows
+  host — treat `install.ps1` as the reference implementation to validate.
+- **No prerequisites:** the installer downloads the pinned Node runtime, so the end
+  user needs nothing pre-installed. Zip installs self-update silently (download →
+  swap → restart → extension reload), including the Node runtime when it changes.

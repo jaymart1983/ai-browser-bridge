@@ -89,4 +89,5 @@ echo ""
 echo "   Dashboard: http://127.0.0.1:8787/"
 echo "   Next: chrome://extensions → Load unpacked → select:"
 echo "     $DIR/extension"
+chmod +x "$DIR/Start Browser Bridge.command" "$DIR/Stop Browser Bridge.command" 2>/dev/null || true
 open "$DIR/extension" 2>/dev/null || true

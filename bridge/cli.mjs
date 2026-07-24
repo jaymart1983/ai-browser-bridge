@@ -80,7 +80,7 @@ async function postCommand(url, body) {
   return { status: resp.status, json };
 }
 
-const HELP = `ai-browser-bridge CLI
+const HELP = `browser-bridge CLI
 Usage: node cli.mjs <method> [jsonParams] [--password <pw> | --token <tok>] [--url <url>] [--raw]
 
 Methods: status, unlock, lock, tabs.list, tab.navigate, tab.create, tab.activate,

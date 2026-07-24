@@ -97,9 +97,9 @@ calls fail with a signature error.
 
 Register it once, then authenticate:
 
-    claude mcp add --transport http ai-browser-bridge http://127.0.0.1:8787/mcp
+    claude mcp add --transport http browser-bridge http://127.0.0.1:8787/mcp
 
-Then run /mcp in an interactive session, select ai-browser-bridge, and choose
+Then run /mcp in an interactive session, select browser-bridge, and choose
 Authenticate. If instead you keep the server in a project .mcp.json file, Claude
 Code asks you to approve the project's servers on startup before it appears in
 /mcp; if that prompt never showed, register it with the command above or run
@@ -115,7 +115,7 @@ shim, which runs locally and handles the browser OAuth for you. Edit
 
     {
       "mcpServers": {
-        "ai-browser-bridge": {
+        "browser-bridge": {
           "command": "npx",
           "args": ["mcp-remote", "http://127.0.0.1:8787/mcp", "--transport", "http-only"]
         }

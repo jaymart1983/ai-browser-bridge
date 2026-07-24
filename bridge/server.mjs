@@ -21,6 +21,7 @@
 //     processes must send the valid access code (as `token`) on every request.
 
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, statSync, renameSync, cpSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -766,13 +767,29 @@ function log(...args) {
   console.log(`[bridge ${new Date().toISOString()}]`, ...args);
 }
 
+// Tray "Quit": fully stop AND stay stopped. A plain process.exit() lets launchd
+// KeepAlive relaunch us instantly; instead we unregister the launchd agent (which
+// also terminates this process). It won't run again until the user starts it via
+// "Start Browser Bridge" (or a login after re-registering). Non-launchd runs just exit.
+function quitBridge() {
+  try { stopTray(); } catch {}
+  try {
+    if (process.platform === 'darwin' && typeof process.getuid === 'function') {
+      spawn('launchctl', ['bootout', `gui/${process.getuid()}/com.aibrowserbridge`], { detached: true, stdio: 'ignore' }).unref();
+    } else if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'schtasks /end /tn BrowserBridge'], { detached: true, stdio: 'ignore' }).unref();
+    }
+  } catch {}
+  setTimeout(() => process.exit(0), 1500); // fallback if bootout didn't tear us down
+}
+
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${PORT}`);
   log(`  extension WS: ws://${HOST}:${PORT}${AGENT_PATH}`);
   log(`  tools POST:   http://${HOST}:${PORT}${COMMAND_PATH}`);
   log(`  perm storage: ${MON_ROOTS.perm}`);
   // Optional menubar tray (blue running / green recording). Never fatal.
-  startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: () => { stopTray(); process.exit(0); } })
+  startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: quitBridge })
     .then((ok) => log(ok ? 'tray icon started' : 'tray icon unavailable (bridge runs without it)'));
   // Opt-in self-update checker (fetches origin periodically; applies only if enabled).
   try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); }
