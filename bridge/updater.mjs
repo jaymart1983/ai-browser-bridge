@@ -15,17 +15,26 @@
 // NOTE: this is the update path for a GIT-CLONE install. A zip/release install
 // (no .git) updates by downloading the release asset instead — see RELEASING.md.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { state, save } from './state.mjs';
 
 const execFileP = promisify(execFile);
 const BRIDGE_DIR = dirname(fileURLToPath(import.meta.url)); // .../browser-bridge/bridge
-const REPO_DIR = dirname(BRIDGE_DIR);                        // .../browser-bridge (git root)
+const REPO_DIR = dirname(BRIDGE_DIR);                        // install dir (git root for git installs)
 const SERVICE = 'com.aibrowserbridge';
+const IS_WIN = process.platform === 'win32';
+
+function readRuntime() { try { return JSON.parse(readFileSync(join(REPO_DIR, 'runtime.json'), 'utf8')); } catch { return {}; } }
+function cmpSemver(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(Number), pb = String(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) > (pb[i] || 0)) return 1; if ((pa[i] || 0) < (pb[i] || 0)) return -1; }
+  return 0;
+}
 
 let last = { checkedAt: 0 };
 let checking = false;
@@ -54,7 +63,7 @@ export function setAutoUpdate(on) { state.autoUpdate = !!on; save(); return { ok
 
 // Current status vs the latest release tag (no network here).
 export async function getStatus() {
-  if (!isGitClone()) return { channel: 'zip', version: bridgeVersion(), autoUpdate: getAutoUpdate(), note: 'Not a git install — updates via downloaded release (see RELEASING.md).' };
+  if (!isGitClone()) return getZipStatus();
   try {
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
     const sha = await git(['rev-parse', '--short', 'HEAD']);
@@ -86,8 +95,81 @@ export async function checkForUpdate() {
   return getStatus();
 }
 
+// ---- ZIP channel: download the release asset, swap files, update runtime -------
+// GitHub's public Releases API tells us the latest tag + asset URLs.
+async function githubLatestRelease(repo) {
+  const r = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'browser-bridge-updater' } });
+  if (r.status === 404) return null; // no releases published yet
+  if (!r.ok) throw new Error('GitHub API ' + r.status);
+  return r.json();
+}
+export async function getZipStatus() {
+  const rt = readRuntime();
+  const version = bridgeVersion();
+  const platform = IS_WIN ? 'windows' : 'macos';
+  let latestVersion = null, assetUrl = null, error = null;
+  try {
+    const rel = rt.repo ? await githubLatestRelease(rt.repo) : null;
+    if (rel) {
+      latestVersion = String(rel.tag_name || '').replace(/^v/, '');
+      const a = (rel.assets || []).find((x) => x.name.includes(platform) && x.name.endsWith('.zip'));
+      assetUrl = a ? a.browser_download_url : null;
+    }
+  } catch (e) { error = String((e && e.message) || e); }
+  const behind = latestVersion && cmpSemver(latestVersion, version) > 0;
+  return { channel: 'zip', version, platform, repo: rt.repo || '', nodePinned: rt.node || '', nodeRunning: process.versions.node, latest: latestVersion, updateAvailable: !!(behind && assetUrl), assetUrl, autoUpdate: getAutoUpdate(), checkedAt: Date.now(), error };
+}
+
+// Download + swap in place. State/recordings/runtime aren't in the zip, so copying
+// the payload over the install dir preserves them. Restarts to load new code.
+async function applyZipUpdate() {
+  const st = await getZipStatus();
+  if (st.error) return { ok: false, error: st.error };
+  if (!st.updateAvailable) return { ok: false, error: 'Already on the latest release.' };
+  const tmp = mkdtempSync(join(tmpdir(), 'bb-upd-'));
+  try {
+    const zip = join(tmp, 'release.zip');
+    const res = await fetch(st.assetUrl);
+    if (!res.ok) return { ok: false, error: 'download failed ' + res.status };
+    writeFileSync(zip, Buffer.from(await res.arrayBuffer()));
+    const stage = join(tmp, 'stage');
+    await execFileP(IS_WIN ? 'powershell' : 'unzip', IS_WIN ? ['-Command', `Expand-Archive -Path '${zip}' -DestinationPath '${stage}' -Force`] : ['-q', zip, '-d', stage]);
+    const src = join(stage, 'browser-bridge'); // top-level folder inside the zip
+    const newRt = (() => { try { return JSON.parse(readFileSync(join(src, 'runtime.json'), 'utf8')); } catch { return {}; } })();
+    const nodeChanged = !!(newRt.node && newRt.node !== process.versions.node);
+    // Swap the app payload over the install dir (never touches runtime/ or state — not in the zip).
+    cpSync(src, REPO_DIR, { recursive: true, force: true });
+    if (nodeChanged) { try { await updateNodeRuntime(newRt.node); } catch (e) { log('runtime update failed:', e && e.message); } }
+    if (onExtensionUpdated) { try { onExtensionUpdated(); } catch {} }
+    log('zip-updated to v' + st.latest + (nodeChanged ? ' + Node ' + newRt.node : '') + '; restarting');
+    scheduleRestart();
+    return { ok: true, restarting: true, to: st.latest, nodeChanged };
+  } finally { try { rmSync(tmp, { recursive: true, force: true }); } catch {} }
+}
+
+// Update the bundled Node runtime to `ver`. macOS: replace runtime/node (the running
+// process keeps the old inode; next launch uses the new file). Windows: the running
+// node.exe is locked, so stage node.new — the run-bridge.cmd launcher swaps it on the
+// next start before relaunching node.
+async function updateNodeRuntime(ver) {
+  const runtime = join(REPO_DIR, 'runtime');
+  mkdirSync(runtime, { recursive: true });
+  if (IS_WIN) {
+    const pkg = `node-v${ver}-win-x64`;
+    await execFileP('powershell', ['-Command',
+      `$u='https://nodejs.org/dist/v${ver}/${pkg}.zip'; $t=Join-Path $env:TEMP 'bbn.zip'; Invoke-WebRequest $u -OutFile $t; ` +
+      `$e=Join-Path $env:TEMP 'bbn'; Remove-Item -Recurse -Force $e -EA SilentlyContinue; Expand-Archive $t $e -Force; ` +
+      `Copy-Item (Join-Path $e '${pkg}\\node.exe') '${join(runtime, 'node.new')}' -Force`]);
+  } else {
+    const na = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const pkg = `node-v${ver}-darwin-${na}`;
+    await execFileP('bash', ['-c', `curl -fsSL "https://nodejs.org/dist/v${ver}/${pkg}.tar.gz" | tar xz -C "${runtime}" --strip-components=2 "${pkg}/bin/node"`], { timeout: 180000 });
+  }
+}
+
 // Fast-forward the clone to the latest release tag + restart.
 export async function applyUpdate() {
+  if (!isGitClone()) return applyZipUpdate();
   const st = await getStatus();
   if (st.error) return { ok: false, error: st.error };
   if (st.channel !== 'release') return { ok: false, error: 'Not a git install — download the latest release instead.' };
@@ -109,10 +191,17 @@ export async function applyUpdate() {
   return { ok: true, restarting: true, tag: st.tag, from: before, to, extensionChanged };
 }
 
-// Restart so the new code loads. launchd (KeepAlive) brings us back.
+// Restart so the new code loads. The service manager (launchd / Task Scheduler)
+// brings us back — and on Windows the run-bridge.cmd launcher swaps node.new first.
 function scheduleRestart() {
   setTimeout(() => {
     try {
+      if (IS_WIN) {
+        // Detached so it survives this process ending, then re-runs the task
+        // (run-bridge.cmd swaps node.new into place before relaunching node).
+        spawn('cmd', ['/c', 'timeout /t 1 >nul & schtasks /run /tn BrowserBridge'], { detached: true, stdio: 'ignore' }).unref();
+        setTimeout(() => process.exit(0), 300); return;
+      }
       const uid = typeof process.getuid === 'function' ? process.getuid() : null;
       if (uid != null) { execFile('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE}`], () => setTimeout(() => process.exit(0), 500)); return; }
     } catch {}
@@ -121,14 +210,15 @@ function scheduleRestart() {
 }
 
 // Periodic checker: first check shortly after boot, then every intervalMs. Applies
-// automatically only when auto-update is on AND a clean fast-forward is possible.
+// automatically only when auto-update is on AND an update is cleanly available.
 export function startUpdateChecker(intervalMs = 6 * 60 * 60 * 1000) {
-  if (!isGitClone()) { log('not a git install — periodic self-update disabled'); return; }
   const tick = async () => {
     try {
       const st = await checkForUpdate();
-      if (getAutoUpdate() && st.canFastForward) { log('auto-updating to ' + st.tag); await applyUpdate(); }
-      else if (st.behind > 0) log('update available: ' + st.tag + (st.canFastForward ? '' : ' (not fast-forwardable)') + (getAutoUpdate() ? '' : '; auto-update off'));
+      const canApply = st.channel === 'zip' ? st.updateAvailable : st.canFastForward;
+      const label = st.tag || (st.latest ? 'v' + st.latest : '');
+      if (getAutoUpdate() && canApply) { log('auto-updating' + (label ? ' to ' + label : '')); await applyUpdate(); }
+      else if (st.behind > 0 || st.updateAvailable) log('update available' + (label ? ': ' + label : '') + (getAutoUpdate() ? '' : '; auto-update off'));
     } catch (e) { log('check failed:', e && e.message); }
   };
   setTimeout(tick, 15000);

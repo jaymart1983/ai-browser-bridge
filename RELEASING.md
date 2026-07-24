@@ -39,10 +39,27 @@ Output in `dist/`:
 - `browser-bridge-macos-v<version>.zip`
 - `browser-bridge-windows-v<version>.zip`
 
-Each is **self-contained**: bridge source + `extension/` + the one runtime dep
-(`ws`, pure JavaScript, cross-platform) + both installers. No git clone, no
-`npm install` on the user's side. **Node.js is the only prerequisite** (installers
-check for it and error clearly if missing).
+Each is small (~150 KB): bridge source + `extension/` + the one pure-JS runtime dep
+(`ws`) + `runtime.json` + installers + `run-bridge.cmd`. **No prerequisites** —
+the installer downloads the PINNED Node runtime (from `runtime.json`) into
+`runtime/` and points the service at it, so the user needs nothing pre-installed.
+
+### Pinned Node runtime
+
+`runtime.json` is the single source of truth for the Node version everyone runs and
+the update repo:
+
+```json
+{ "node": "22.14.0", "repo": "jaymart1983/ai-browser-bridge" }
+```
+
+- Installers (`install.sh` / `install.ps1`) fetch `node-v<node>` for the platform,
+  verify it against the official `SHASUMS256.txt`, drop the binary in `runtime/`,
+  and register the service to run it.
+- To change the runtime, bump `"node"` and cut a release. The self-updater notices
+  the version changed and updates the bundled binary too (macOS: replace in place;
+  Windows: stage `runtime\node.new`, which `run-bridge.cmd` swaps in on next start,
+  since a running `node.exe` is locked).
 
 Deliberately excluded from the zip: `.git/`, `node_modules/` except `ws`,
 `bridge/.bridge-state.json*` (secrets/grants), `bridge/bridge.log`, `recordings/`.
@@ -84,9 +101,13 @@ Two install shapes, two update paths:
   release changed `extension/`, the bridge signals connected extensions to
   `chrome.runtime.reload()` so they pick up the new code too.
 - **Zip install** (extracted a release zip; no `.git`): the updater reports
-  `channel: "zip"` and does **not** self-update. To update, download the newer
-  release zip and re-run the installer. (A future enhancement can auto-download the
-  release asset via the GitHub API; the hook is documented in `updater.mjs`.)
+  `channel: "zip"` and **self-updates silently** — it polls the GitHub Releases API,
+  and when a newer version exists it downloads the matching asset, swaps the app
+  files over the install dir (your `.bridge-state.json`, grants, pairing, and
+  recordings are preserved — they aren't in the zip), updates the Node runtime if
+  `runtime.json` changed, restarts via the service manager, and signals the
+  extension to reload. Same guardrail: only when auto-update is on (Config →
+  Updates). The user sees a ~1–2 s reconnect, nothing to click.
 
 ## Install (end user)
 
