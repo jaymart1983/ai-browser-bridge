@@ -40,18 +40,43 @@ navigate, control, and record a chosen set of tabs.
 - Google Chrome or another Chromium browser
 - An MCP-capable agent
 
-## Setup
+## Install (one command, no prerequisites)
+
+You do not need Node or anything else installed. One command downloads the latest
+release into a Browser Bridge folder, fetches a pinned Node runtime, and starts it.
+
+macOS — installs to ~/Applications/Browser Bridge:
+
+```
+curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash
+```
+
+Windows (PowerShell) — installs to %LOCALAPPDATA%\Programs\Browser Bridge:
+
+```
+irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex
+```
+
+Then load the extension (one time): open chrome://extensions, turn on Developer
+mode, click Load unpacked, and select the extension folder inside the install
+directory (the installer opens it for you). Click Link in the extension popup.
+
+To start/stop later, double-click "Start Browser Bridge" or "Stop Browser Bridge"
+in the install folder.
+
+## Setup from source (developers)
 
 1. Clone the repository and enter it.
 
-2. Install and start the bridge:
+2. Install and start the bridge (runs IN PLACE — it does not move files; put the
+   folder where you want it first):
 
    ```
    ./install.sh
    ```
 
-   This installs dependencies and runs the bridge in the background, starting
-   it again at login. The control panel is at http://127.0.0.1:8787.
+   This downloads the pinned Node runtime and runs the bridge in the background,
+   starting it again at login. The control panel is at http://127.0.0.1:8787.
 
 3. Load the extension in your browser:
 
