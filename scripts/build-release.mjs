@@ -18,7 +18,7 @@
 //
 // See RELEASING.md for the full versioning + publishing flow.
 
-import { rmSync, mkdirSync, cpSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
+import { rmSync, mkdirSync, cpSync, existsSync, readFileSync, copyFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,11 +45,15 @@ for (const rel of tracked) {
   copyFileSync(src, dst);
 }
 
-// Bundle the single required runtime dep (pure JS → safe on any OS).
-const wsSrc = join(ROOT, 'bridge', 'node_modules', 'ws');
-if (!existsSync(wsSrc)) { console.error('ws not installed — run `npm install` in bridge/ first.'); process.exit(1); }
+// Bundle runtime deps. ws (pure JS) is required. systray2 carries per-platform tray
+// binaries (tray_darwin_release / tray_windows_release.exe / …) so it's safe to
+// bundle everywhere — each OS loads its own, and tray.mjs is defensive if absent.
 mkdirSync(join(STAGE, 'bridge', 'node_modules'), { recursive: true });
-cpSync(wsSrc, join(STAGE, 'bridge', 'node_modules', 'ws'), { recursive: true });
+for (const dep of ['ws', 'systray2']) {
+  const src = join(ROOT, 'bridge', 'node_modules', dep);
+  if (!existsSync(src)) { console.error(`${dep} not installed — run \`npm install\` in bridge/ first.`); process.exit(1); }
+  cpSync(src, join(STAGE, 'bridge', 'node_modules', dep), { recursive: true });
+}
 
 // Zip per OS (identical payload; per-OS names make the right download obvious).
 mkdirSync(DIST, { recursive: true });
@@ -60,4 +64,25 @@ for (const os of ['macos', 'windows']) {
   console.log('  wrote ' + zip);
 }
 rmSync(STAGE, { recursive: true, force: true });
-console.log('Done. Attach the two dist/*.zip files to the GitHub Release for v' + version + '.');
+
+// Double-click installers (users download ONE of these, not the app zip).
+//  - macOS: a .command inside a zip. A raw downloaded .command loses its execute
+//    bit and won't run; a zip preserves +x. (Gatekeeper still needs right-click →
+//    Open once — that's unavoidable until the installer is signed + notarized.)
+//  - Windows: a raw .cmd is double-clickable as-is.
+const instMac = join(DIST, 'installer-macos');
+rmSync(instMac, { recursive: true, force: true });
+mkdirSync(instMac, { recursive: true });
+copyFileSync(join(ROOT, 'bootstrap.sh'), join(instMac, 'Install Browser Bridge.command'));
+execFileSync('chmod', ['+x', join(instMac, 'Install Browser Bridge.command')]);
+const macInstallerZip = join(DIST, `Install-Browser-Bridge-macOS-v${version}.zip`);
+rmSync(macInstallerZip, { force: true });
+execFileSync('zip', ['-q', '-j', '-X', macInstallerZip, join(instMac, 'Install Browser Bridge.command')]);
+rmSync(instMac, { recursive: true, force: true });
+console.log('  wrote ' + macInstallerZip);
+
+writeFileSync(join(DIST, `Install-Browser-Bridge-Windows-v${version}.cmd`),
+  '@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex"\r\npause\r\n');
+console.log('  wrote ' + join(DIST, `Install-Browser-Bridge-Windows-v${version}.cmd`));
+
+console.log('Done. Attach all dist/* artifacts to the GitHub Release for v' + version + '.');
