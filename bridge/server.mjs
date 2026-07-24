@@ -33,6 +33,7 @@ import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setAct
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
+import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker } from './updater.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -223,6 +224,19 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/rename') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b && b.browserId ? renameBrowser(String(b.browserId), b.name) : { ok: false, error: 'browserId required' }));
+  }
+  // Self-update (opt-in, loopback). Guardrails live in updater.mjs.
+  if (req.method === 'GET' && url.pathname === '/bridge/update') {
+    return getUpdateStatus().then((s) => sendJson(res, 200, s));
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/update/check') {
+    return checkForUpdate().then((s) => sendJson(res, 200, s));
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/update/apply') {
+    return applyUpdate().then((r) => sendJson(res, 200, r));
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/update/config') {
+    return readJsonBody(req).then((b) => sendJson(res, 200, setAutoUpdate(!!(b && b.autoUpdate))));
   }
 
   if (url.pathname === COMMAND_PATH) {
@@ -757,6 +771,8 @@ server.listen(PORT, HOST, () => {
   // Optional menubar tray (blue running / green recording). Never fatal.
   startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: () => { stopTray(); process.exit(0); } })
     .then((ok) => log(ok ? 'tray icon started' : 'tray icon unavailable (bridge runs without it)'));
+  // Opt-in self-update checker (fetches origin periodically; applies only if enabled).
+  try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); }
 });
 
 server.on('error', (e) => {

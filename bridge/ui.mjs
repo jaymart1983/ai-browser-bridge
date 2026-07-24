@@ -180,7 +180,39 @@ function configPage() {
       <form method=POST action="/config"><input type=hidden name=action value=clear><input type=hidden name=root value=tmp><button>Clear Tmp</button></form>
       <span class="grow">Permanent <b>${fmtBytes(usage.perm)}</b></span>
       <form method=POST action="/config"><input type=hidden name=action value=clear><input type=hidden name=root value=perm><button>Clear Perm</button></form>
-    </div></div>`, '/config');
+    </div></div>
+
+    <h2>Updates <span class="mut" style="font-size:12px;font-weight:400">fast-forward this install from GitHub</span></h2>
+    <div class="card"><div id="updBox" class="mut">Loading…</div></div>
+    <script>
+    (function(){
+      function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+      var box=document.getElementById('updBox');
+      function render(d){
+        if(!d){box.innerHTML='<span class="mut">Unavailable.</span>';return;}
+        if(d.error){box.innerHTML='<span class="mut">Update check unavailable: '+esc(d.error)+'</span>';return;}
+        var upToDate=(d.behind||0)===0;
+        var status = d.canFastForward ? '<b style="color:var(--accent)">Update available</b> — '+d.behind+' commit'+(d.behind===1?'':'s')+' behind'
+          : upToDate ? '<b style="color:var(--ok)">Up to date</b>'
+          : d.ahead>0 ? '<b style="color:var(--warn)">'+d.ahead+' local commit(s) not on GitHub</b> — auto-update paused'
+          : !d.clean ? '<b style="color:var(--warn)">Local changes present</b> — auto-update paused'
+          : (d.behind>0?'<b style="color:var(--warn)">'+d.behind+' behind, not fast-forwardable</b>':'—');
+        box.innerHTML =
+          '<div class="row"><span class="grow">'+status+'</span>'
+            +'<button id="chk">Check now</button>'
+            +(d.canFastForward?'<button id="apply" class="primary">Update &amp; restart</button>':'')+'</div>'
+          +'<div class="mut" style="font-size:12px;margin-top:6px">Bridge <b>v'+esc(d.version||'?')+'</b> · '+esc(d.branch||'')+' @ '+esc(d.sha||'?')
+            +(d.remoteSha?' · GitHub @ '+esc(d.remoteSha):'')+'<br>source '+esc(d.remoteUrl||'')+'</div>'
+          +'<label class="row" style="margin-top:10px;gap:8px;cursor:pointer"><input type="checkbox" id="auto"'+(d.autoUpdate?' checked':'')+'> '
+            +'<span>Automatically install updates when a clean fast-forward is available</span></label>';
+        var chk=document.getElementById('chk'); if(chk) chk.onclick=async function(){box.innerHTML='<span class="mut">Checking GitHub…</span>';render(await (await fetch('/bridge/update/check',{method:'POST'})).json());};
+        var ap=document.getElementById('apply'); if(ap) ap.onclick=async function(){if(!confirm('Update the bridge and restart it now?'))return;box.innerHTML='<span class="mut">Updating &amp; restarting… this page will reconnect.</span>';var r=await (await fetch('/bridge/update/apply',{method:'POST'})).json();if(!r.ok){box.innerHTML='<span class="mut">Update failed: '+esc(r.error||'')+'</span>';}else{setTimeout(function(){location.reload();},4000);}};
+        var au=document.getElementById('auto'); if(au) au.onchange=async function(){await fetch('/bridge/update/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({autoUpdate:au.checked})});load();};
+      }
+      async function load(){ try{ render(await (await fetch('/bridge/update',{cache:'no-store'})).json()); }catch{ box.innerHTML='<span class="mut">Unavailable.</span>'; } }
+      load();
+    })();
+    </script>`, '/config');
 }
 
 function modulesPage() {

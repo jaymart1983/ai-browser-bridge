@@ -18,6 +18,7 @@ export const state = {
   pairing: null, // legacy single bridge↔extension pairing (migrated into `browsers`)
   browsers: {},  // browserId -> { id, name, key(hex), created, lastSeen } — linked browsers
   activeBrowser: null, // browserId that currently receives relayed commands
+  autoUpdate: false, // opt-in: auto fast-forward the git clone from origin + restart
 
   // Capability platform (the rule engine + modules).
   modulesEnabled: [],  // [moduleId] — which capability modules are active
@@ -34,6 +35,7 @@ export function load() {
       for (const k of ['modulesEnabled', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
       if ('pairing' in d) state.pairing = d.pairing;
       if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;
+      if ('autoUpdate' in d) state.autoUpdate = !!d.autoUpdate;
     }
   } catch { /* start empty */ }
   return state;
