@@ -25,6 +25,8 @@ const SERVICE = 'com.aibrowserbridge';
 
 let last = { checkedAt: 0 };
 let checking = false;
+let onExtensionUpdated = null; // called after a pull that changed extension/ source
+export function configureUpdater(o) { onExtensionUpdated = (o && o.onExtensionUpdated) || null; }
 
 const log = (...a) => console.log('[updater]', ...a);
 async function git(args, timeout = 30000) {
@@ -82,13 +84,17 @@ export async function applyUpdate() {
   const before = st.sha;
   try { await git(['pull', '--ff-only', 'origin', st.branch], 60000); }
   catch (e) { return { ok: false, error: 'git pull failed: ' + String((e && e.message) || e) }; }
-  let depsChanged = false;
-  try { depsChanged = /bridge\/package(-lock)?\.json/.test(await git(['diff', '--name-only', before, 'HEAD'])); } catch {}
-  if (depsChanged) { try { await execFileP('npm', ['install', '--no-audit', '--no-fund'], { cwd: BRIDGE_DIR, timeout: 180000 }); } catch (e) { log('npm install failed:', e && e.message); } }
+  let changed = '';
+  try { changed = '\n' + await git(['diff', '--name-only', before, 'HEAD']) + '\n'; } catch {}
+  if (/\nbridge\/package(-lock)?\.json\n/.test(changed)) { try { await execFileP('npm', ['install', '--no-audit', '--no-fund'], { cwd: BRIDGE_DIR, timeout: 180000 }); } catch (e) { log('npm install failed:', e && e.message); } }
+  // If the extension source changed, ask connected extensions to reload from disk
+  // (chrome.runtime.reload re-reads the unpacked files the pull just updated).
+  const extensionChanged = /\nextension\//.test(changed);
+  if (extensionChanged && onExtensionUpdated) { try { onExtensionUpdated(); } catch {} }
   const to = await git(['rev-parse', '--short', 'HEAD']).catch(() => '');
-  log('updated ' + before + ' -> ' + to + '; restarting');
+  log('updated ' + before + ' -> ' + to + (extensionChanged ? ' (extension reload signaled)' : '') + '; restarting');
   scheduleRestart();
-  return { ok: true, restarting: true, from: before, to };
+  return { ok: true, restarting: true, from: before, to, extensionChanged };
 }
 
 // Restart so the new code loads. launchd (KeepAlive) brings us back.

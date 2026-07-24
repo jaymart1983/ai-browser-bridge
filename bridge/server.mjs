@@ -33,7 +33,7 @@ import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setAct
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
-import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker } from './updater.mjs';
+import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -413,6 +413,9 @@ function notifyActive() {
 // Let OAuth push the pending-request count so every linked browser badges its icon
 // (auth is bridge-wide, not tied to one browser).
 configureOAuth({ notifyPending: (n) => broadcastToAgents({ type: 'pending', count: n }) });
+// After a self-update that changed extension/ source, tell connected extensions to
+// reload so they pick up the new code (they run unpacked from the same git clone).
+configureUpdater({ onExtensionUpdated: () => broadcastToAgents({ type: 'reload_extension' }) });
 
 wss.on('connection', (ws) => {
   log('extension agent connected');

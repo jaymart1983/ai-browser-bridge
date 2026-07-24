@@ -380,6 +380,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  // Bridge self-updated the extension source on disk → reload to run the new code.
+  // For an unpacked extension, chrome.runtime.reload() re-reads the files from disk.
+  if (msg.type === 'RELOAD_EXTENSION') {
+    try { chrome.runtime.reload(); } catch {}
+    return;
+  }
+
   // Pairing handshake reply from the bridge (relayed via offscreen).
   if (msg.type === 'PAIR_ACK' && typeof msg.pub === 'string') {
     finishPairing(msg.pub).catch(() => {});

@@ -112,6 +112,11 @@ async function onWsMessage(raw) {
       chrome.runtime.sendMessage({ type: 'PENDING', count: cmd.count | 0 }).catch(() => {});
       return;
     }
+    // Bridge self-updated the extension source → reload to pick up new code.
+    if (cmd && cmd.type === 'reload_extension') {
+      chrome.runtime.sendMessage({ type: 'RELOAD_EXTENSION' }).catch(() => {});
+      return;
+    }
     if (cmd && cmd.type) return; // other hello/ack frames — no reply
     safeSend({ id: cmd && cmd.id, error: { code: 'BAD_REQUEST', message: 'Missing method.' } });
     return;
