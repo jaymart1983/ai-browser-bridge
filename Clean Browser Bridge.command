@@ -51,9 +51,17 @@ for d in "$HOME/Downloads"/browser-bridge*/ ; do
   [ -d "$d" ] && remove_install "${d%/}"
 done
 
+# 4) Reset mcp-remote's saved registration (Claude Desktop's agent cache) so it
+# re-registers cleanly against the fresh bridge instead of presenting a stale
+# client_id the new bridge won't recognize. Moved to a .bak (recoverable).
+if [ -d "$HOME/.mcp-auth" ]; then
+  mv "$HOME/.mcp-auth" "$HOME/.mcp-auth.bak-$(date +%s)" && echo "-- reset mcp-remote cache (~/.mcp-auth)"
+fi
+
 echo ""
-echo "Done. Service + installs removed. Your source repo (if any) was left untouched."
-echo "Finish the wipe by removing the extension from chrome://extensions."
+echo "Done. Service + installs + agent cache reset. Your source repo (if any) was left untouched."
+echo "Finish the wipe by removing the extension from chrome://extensions,"
+echo "then quit + reopen Claude Desktop so its MCP client registers fresh."
 echo ""
 read -n 1 -s -r -p "Press any key to close."
 echo ""
