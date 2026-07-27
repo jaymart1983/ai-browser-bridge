@@ -1,0 +1,40 @@
+Browser Bridge — if macOS says it "cannot be verified"
+=======================================================
+
+Browser Bridge is not signed by Apple (that requires a paid Apple Developer
+account), so the FIRST time you open the installer, macOS may say it "cannot be
+verified as free of malware." This is normal for any app not from the App Store.
+Here is how to allow it. You only do this ONCE.
+
+
+Easiest: install from a terminal (no warning at all)
+----------------------------------------------------
+Open Terminal (Applications > Utilities > Terminal), paste this, press Return:
+
+    curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash
+
+Files downloaded this way are not quarantined, so nothing is blocked. Done.
+
+
+If you'd rather double-click the installer
+------------------------------------------
+Option A - no Terminal:
+    1. Double-click "Install Browser Bridge.command". You'll get the
+       "cannot be verified" message - click Done.
+    2. Open System Settings > Privacy & Security.
+    3. Scroll down. You'll see "Install Browser Bridge.command was blocked."
+       Click "Open Anyway", then confirm.
+    It runs from now on.
+
+Option B - one Terminal command, then double-click:
+    Run this once (it clears the download flag from the installer), then
+    double-click the installer normally:
+
+    xattr -dr com.apple.quarantine ~/Downloads/"Install Browser Bridge.command"
+
+
+After it installs
+-----------------
+The installer handles everything else automatically - it clears the quarantine
+flag from the app and starts the bridge. Future updates install themselves with
+no prompts. You never need to repeat any of the above.

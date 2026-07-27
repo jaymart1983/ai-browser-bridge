@@ -75,9 +75,12 @@ rmSync(instMac, { recursive: true, force: true });
 mkdirSync(instMac, { recursive: true });
 copyFileSync(join(ROOT, 'bootstrap.sh'), join(instMac, 'Install Browser Bridge.command'));
 execFileSync('chmod', ['+x', join(instMac, 'Install Browser Bridge.command')]);
+copyFileSync(join(ROOT, 'READ ME FIRST (macOS).txt'), join(instMac, 'READ ME FIRST (macOS).txt'));
 const macInstallerZip = join(DIST, `Install-Browser-Bridge-macOS-v${version}.zip`);
 rmSync(macInstallerZip, { force: true });
-execFileSync('zip', ['-q', '-j', '-X', macInstallerZip, join(instMac, 'Install Browser Bridge.command')]);
+execFileSync('zip', ['-q', '-j', '-X', macInstallerZip,
+  join(instMac, 'Install Browser Bridge.command'),
+  join(instMac, 'READ ME FIRST (macOS).txt')]);
 rmSync(instMac, { recursive: true, force: true });
 console.log('  wrote ' + macInstallerZip);
 
