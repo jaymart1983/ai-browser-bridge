@@ -37,7 +37,9 @@ mkdirSync(STAGE, { recursive: true });
 // ai-analyst.mjs whose source of truth is another repo) is excluded by construction.
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files'], { encoding: 'utf8' })
   .split('\n').map((s) => s.trim()).filter(Boolean);
+const EXCLUDE = new Set(['Clean Browser Bridge.command']); // dev wipe tool — never ship it
 for (const rel of tracked) {
+  if (EXCLUDE.has(rel)) continue;
   const src = join(ROOT, rel);
   if (!existsSync(src)) continue;
   const dst = join(STAGE, rel);
