@@ -46,6 +46,15 @@ if [ ! -d "$BRIDGE/node_modules/ws" ]; then
     echo "⚠️  bridge/node_modules/ws missing and no npm available — use a release zip (deps bundled)."; fi
 fi
 
+# Clear the quarantine flag from the whole install so bundled binaries (the
+# systray2 tray helper) aren't blocked by Gatekeeper with "cannot be verified..."
+# when the bridge runs them. Free, no certificate needed.
+xattr -cr "$DIR" 2>/dev/null || true
+# Ad-hoc sign the tray helper too (satisfies Apple Silicon's "must be signed to
+# run" rule; free, no Apple account). Harmless if it's already signed.
+TRAYBIN="$BRIDGE/node_modules/systray2/traybin/tray_darwin_release"
+[ -f "$TRAYBIN" ] && codesign --force --sign - "$TRAYBIN" 2>/dev/null || true
+
 # Free the port if something is already on it.
 lsof -ti:8787 | xargs kill -9 2>/dev/null || true
 
