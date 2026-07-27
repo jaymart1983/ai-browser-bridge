@@ -45,18 +45,30 @@ navigate, control, and record a chosen set of tabs.
 You do not need Node or anything else installed. The installer downloads the latest
 release, fetches a pinned Node runtime, and starts the bridge.
 
-### Download and double-click (recommended)
+### One command in a terminal (recommended — no security prompt)
+
+Because these are fetched with curl/PowerShell (not a browser), macOS Gatekeeper /
+Windows SmartScreen do not flag them:
+
+- macOS: `curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash`
+- Windows: `irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex`
+
+Each installs to a Browser Bridge folder (`~/Applications/Browser Bridge` on macOS,
+`%LOCALAPPDATA%\Programs\Browser Bridge` on Windows), fetches a pinned Node runtime,
+and starts the bridge.
+
+### Or download and double-click
 
 Grab the installer for your OS from the
 [latest release](https://github.com/jaymart1983/browser-bridge/releases/latest):
 
-- **macOS** — download `Install-Browser-Bridge-macOS-*.zip`. It expands to a single
-  file, **`Install Browser Bridge.command`**. **Right-click it → Open** (macOS asks
-  once because the app isn't from an identified developer — click Open). It installs
-  everything to `~/Applications/Browser Bridge` and starts the bridge.
-- **Windows** — download `Install-Browser-Bridge-Windows-*.cmd` and double-click it
-  (if SmartScreen warns, click "More info" → "Run anyway"). It installs to
-  `%LOCALAPPDATA%\Programs\Browser Bridge`.
+- **macOS** — download `Install-Browser-Bridge-macOS-*.zip`; it expands to
+  **`Install Browser Bridge.command`**. Because it's downloaded and not
+  Apple-notarized, macOS will say it "cannot be verified." To allow it: try to open
+  it once, then go to **System Settings → Privacy & Security** and click
+  **"Open Anyway"**, then Open. (This is a one-time step per download.)
+- **Windows** — download `Install-Browser-Bridge-Windows-*.cmd` and double-click; if
+  SmartScreen warns, click "More info" → "Run anyway."
 
 Then load the extension (one time): open `chrome://extensions`, turn on Developer
 mode, click Load unpacked, and select the `extension` folder inside the install
@@ -64,11 +76,6 @@ directory (the installer opens it for you). Click **Link** in the extension popu
 
 To start or stop the bridge later, double-click **Start Browser Bridge** or
 **Stop Browser Bridge** in the install folder.
-
-### Or one command in a terminal
-
-- macOS: `curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash`
-- Windows: `irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex`
 
 ## Setup from source (developers)
 
