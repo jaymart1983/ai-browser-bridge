@@ -220,13 +220,24 @@ function updateIcon() {
       })
       .catch(() => {});
   }
-  // Badge: how many tabs are recording right now (blank when none).
+  // The recording indicator is now PER-TAB (see setTabRecordingBadge): a red ● shows
+  // on the icon only for the specific tab being recorded. Keep the GLOBAL badge empty
+  // so tabs that aren't recording stay clean, and set the shared badge colors here.
   if (chrome.action && chrome.action.setBadgeText) {
-    const n = monitored.size;
-    chrome.action.setBadgeText({ text: n ? String(n) : '' }).catch(() => {});
-    chrome.action.setBadgeBackgroundColor({ color: '#2e9e44' }).catch(() => {});
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ color: '#e5484d' }).catch(() => {});
     if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ color: '#ffffff' }).catch(() => {});
   }
+}
+
+// Paint a red ● on the toolbar icon FOR one specific tab while it's being recorded.
+// Chrome shows the per-tab badge only when that tab is active, so the icon tells you
+// at a glance whether the tab you're looking at is recording. Clearing reverts it to
+// the empty global badge.
+function setTabRecordingBadge(tabId, on) {
+  if (!(chrome.action && chrome.action.setBadgeText) || typeof tabId !== 'number') return;
+  chrome.action.setBadgeText({ tabId, text: on ? '●' : '' }).catch(() => {});
+  if (on) chrome.action.setBadgeBackgroundColor({ tabId, color: '#e5484d' }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +328,7 @@ async function ensureOffscreen() {
   await creatingOffscreen;
   // Push the current bridge URL to the new document.
   const bridgeUrl = await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
-  await sendToOffscreen({ type: 'CONFIG', bridgeUrl }).catch(() => {});
+  await sendToOffscreen({ type: 'CONFIG', bridgeUrl, version: VERSION }).catch(() => {});
 }
 
 async function ensureKeepaliveAlarm() {
@@ -1008,7 +1019,8 @@ async function monitorStart(tabId) {
   // bridge can name the tab like the browser does.
   for (const delay of [700, 2000, 4500]) setTimeout(() => refreshTabMeta(tabId).catch(() => {}), delay);
   screenshotMonitored(tabId).catch(() => {}); // one initial frame; the rest are activity-driven
-  updateIcon(); // refresh the recording-count badge + color
+  setTabRecordingBadge(tabId, true); // red ● on this tab's icon
+  updateIcon(); // refresh icon color + title
   // The bridge writes to <os.tmpdir()>/browser-bridge/<sessionKey>/.
   return { tabId, sessionKey };
 }
@@ -1019,7 +1031,8 @@ async function monitorStop(tabId) {
   emitMonitor(tabId, { kind: 'session', event: 'stop', eventCount: rec.eventCount });
   if (rec.shotTimer) clearTimeout(rec.shotTimer);
   monitored.delete(tabId);
-  updateIcon(); // back to blue (connected, idle) + clear the badge
+  setTabRecordingBadge(tabId, false); // clear this tab's ●
+  updateIcon(); // back to blue (connected, idle) if nothing else recording
   return { tabId, stopped: true, sessionKey: rec.sessionKey };
 }
 
@@ -1116,7 +1129,7 @@ async function handlePopup(msg) {
         return { ok: false, error: 'Bridge URL must be ws(s)://127.0.0.1[:port]/path' };
       }
       await setLocal({ [K_BRIDGE_URL]: url });
-      await sendToOffscreen({ type: 'CONFIG', bridgeUrl: url }).catch(() => {});
+      await sendToOffscreen({ type: 'CONFIG', bridgeUrl: url, version: VERSION }).catch(() => {});
       return { ok: true };
     }
 

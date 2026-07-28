@@ -14,6 +14,10 @@
 const DEFAULT_BRIDGE_URL = 'ws://127.0.0.1:8787/agent';
 
 let bridgeUrl = DEFAULT_BRIDGE_URL;
+// The offscreen document only gets chrome.runtime's messaging APIs — NOT
+// getManifest() — so the service worker (where it works) hands us the version via
+// CONFIG. Default '' until then; the bridge treats an empty version as unknown.
+let extVersion = '';
 let ws = null;
 let reconnectTimer = null;
 let backoffMs = 500; // grows to a cap on repeated failures
@@ -45,7 +49,7 @@ function connect() {
     // to a linked browser (and route/activate correctly with several linked).
     let ident = {};
     try { ident = await chrome.storage.local.get(['browserId', 'browserName']); } catch {}
-    safeSend({ type: 'hello', role: 'extension', version: chrome.runtime.getManifest().version, browserId: ident.browserId || null, browserName: ident.browserName || null });
+    safeSend({ type: 'hello', role: 'extension', version: extVersion, browserId: ident.browserId || null, browserName: ident.browserName || null });
   });
 
   ws.addEventListener('message', (ev) => {
@@ -146,6 +150,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   switch (msg.type) {
     case 'CONFIG':
+      if (msg.version) extVersion = msg.version;
       if (msg.bridgeUrl && msg.bridgeUrl !== bridgeUrl) {
         bridgeUrl = msg.bridgeUrl;
         // Force a fresh connection to the new URL.
