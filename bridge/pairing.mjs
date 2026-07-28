@@ -129,3 +129,21 @@ export function verifyMac(frame) {
   const expect = createHmac('sha256', Buffer.from(key, 'hex')).update(canon(frame)).digest('hex');
   try { return timingSafeEqual(Buffer.from(frame.mac), Buffer.from(expect)); } catch { return false; }
 }
+
+// Verify an OAuth consent decision was signed by a LINKED browser's pairing key.
+// This is the anti-self-approval gate: only the paired extension (a human clicking
+// Approve) holds a key, so unsigned local code cannot approve a grant. Accepts a
+// signature from ANY currently-linked browser (or the legacy pairing).
+export function verifyDecision(reqId, approve, mac) {
+  if (!reqId || !mac) return false;
+  const msg = `${reqId}\n${approve ? 1 : 0}`;
+  const keys = Object.values(state.browsers || {}).map((b) => b.key).filter(Boolean);
+  if (state.pairing && state.pairing.key) keys.push(state.pairing.key);
+  for (const k of keys) {
+    try {
+      const expect = createHmac('sha256', Buffer.from(k, 'hex')).update(msg).digest('hex');
+      if (timingSafeEqual(Buffer.from(mac), Buffer.from(expect))) return true;
+    } catch { /* try next key */ }
+  }
+  return false;
+}

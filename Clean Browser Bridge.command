@@ -7,23 +7,28 @@
 # removes folders under your home that actually look like an install.
 set -u
 
-LABEL="com.aibrowserbridge"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# Both the current label and the old one (renamed from com.aibrowserbridge).
+LABELS="com.browserbridge com.aibrowserbridge"
 UID_="$(id -u)"
 
 echo "== Clean Browser Bridge =="
 
-# Where does the current launchd service point? (read before we delete the plist)
+# Where do the launchd services point? (read before we delete the plists)
 INSTALL_FROM_PLIST=""
-if [ -f "$PLIST" ]; then
-  SERVER="$(grep 'server\.mjs' "$PLIST" | sed -E 's:.*<string>([^<]*)</string>.*:\1:' | head -1)"
-  [ -n "$SERVER" ] && INSTALL_FROM_PLIST="$(dirname "$(dirname "$SERVER")")"
-fi
+for L in $LABELS; do
+  P="$HOME/Library/LaunchAgents/$L.plist"
+  if [ -f "$P" ] && [ -z "$INSTALL_FROM_PLIST" ]; then
+    SERVER="$(grep 'server\.mjs' "$P" | sed -E 's:.*<string>([^<]*)</string>.*:\1:' | head -1)"
+    [ -n "$SERVER" ] && INSTALL_FROM_PLIST="$(dirname "$(dirname "$SERVER")")"
+  fi
+done
 
-# 1) Stop + unregister the launchd agent (so KeepAlive won't relaunch it).
+# 1) Stop + unregister BOTH launchd agents (so KeepAlive won't relaunch them).
 echo "-- stopping service"
-launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
-rm -f "$PLIST"
+for L in $LABELS; do
+  launchctl bootout "gui/$UID_/$L" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$L.plist"
+done
 pkill -f "bridge/server.mjs" 2>/dev/null || true
 
 # 2) Remove install folders — never a git checkout, never outside $HOME.

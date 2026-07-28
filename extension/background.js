@@ -545,6 +545,23 @@ async function verifyFrameMac(cmd) {
   return bufToHex(sig) === cmd.mac;
 }
 
+// Approve/deny an OAuth consent request. Signed HERE with the pairing key (which
+// never leaves the service worker) so the bridge knows a HUMAN in this paired
+// browser approved it — an unsigned local process cannot. The popup routes its
+// Approve/Deny clicks through here.
+async function submitOauthDecision(reqId, approve) {
+  const keyHex = await getPairKey();
+  if (!keyHex) return { ok: false, error: 'This browser is not linked to the bridge.' };
+  const key = await crypto.subtle.importKey('raw', hexToBuf(keyHex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${reqId}\n${approve ? 1 : 0}`));
+  const mac = bufToHex(sig);
+  const base = (await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL)).replace(/^ws/, 'http').replace(/\/agent.*$/, '');
+  try {
+    const r = await fetch(base + '/oauth/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reqId, approve: approve ? 1 : 0, mac }) });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e && e.message) }; }
+}
+
 // autopair.json is written into the extension dir by an embedder (AI Analyst) that
 // force-loads this extension; when present, its token lets us pair HANDS-FREE (no "Link"
 // click). undefined = not yet loaded, null = none present, string = the token.
@@ -1014,7 +1031,7 @@ async function monitorStart(tabId) {
   for (const delay of [700, 2000, 4500]) setTimeout(() => refreshTabMeta(tabId).catch(() => {}), delay);
   screenshotMonitored(tabId).catch(() => {}); // one initial frame; the rest are activity-driven
   updateIcon(); // refresh the recording-count badge + color
-  // The bridge writes to <os.tmpdir()>/ai-browser-bridge/<sessionKey>/.
+  // The bridge writes to <os.tmpdir()>/browser-bridge/<sessionKey>/.
   return { tabId, sessionKey };
 }
 
@@ -1098,6 +1115,10 @@ async function handlePopup(msg) {
     case 'unpair': {
       await clearPairing();
       return { ok: true };
+    }
+
+    case 'oauthDecision': {
+      return await submitOauthDecision(msg.reqId, !!msg.approve);
     }
 
     case 'monitorStart': {

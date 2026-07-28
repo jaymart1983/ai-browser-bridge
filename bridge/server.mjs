@@ -134,7 +134,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && url.pathname === '/health') {
     return sendJson(res, 200, {
       ok: true,
-      service: 'ai-browser-bridge',
+      service: 'browser-bridge',
       // An embedder (AI Analyst) stamps the bundle version it shipped via BRIDGE_BUNDLE_VERSION.
       // A standalone bridge (or an older bundle that predates this field) reports null, which the
       // embedder treats as "not my bundled bridge / unknown version".
@@ -506,7 +506,7 @@ setInterval(() => {
 
 // ---------------------------------------------------------------------------
 // Monitor event writer — dumps a monitored tab's stream to a tmp session dir:
-//   <os.tmpdir()>/ai-browser-bridge/<sessionKey>/
+//   <os.tmpdir()>/browser-bridge/<sessionKey>/
 //     events.jsonl        one JSON line per event (network/navigation/session)
 //     screenshots/NNNNN.jpg   screenshot frames (referenced by path in events)
 //     meta.json           {sessionKey, tabId, startedAt, lastEventAt, counts}
@@ -516,7 +516,7 @@ setInterval(() => {
 //   tmp  — OS temp dir; cleared on reboot (scratch recordings).
 //   perm — <project>/browser-bridge/recordings; survives reboot.
 const MON_ROOTS = {
-  tmp: join(tmpdir(), 'ai-browser-bridge'),
+  tmp: join(tmpdir(), 'browser-bridge'),
   perm: process.env.BRIDGE_PERM_DIR || join(dirname(fileURLToPath(import.meta.url)), '..', 'recordings'),
 };
 const ROOT_KEYS = ['tmp', 'perm'];
@@ -775,7 +775,7 @@ function quitBridge() {
   try { stopTray(); } catch {}
   try {
     if (process.platform === 'darwin' && typeof process.getuid === 'function') {
-      spawn('launchctl', ['bootout', `gui/${process.getuid()}/com.aibrowserbridge`], { detached: true, stdio: 'ignore' }).unref();
+      spawn('launchctl', ['bootout', `gui/${process.getuid()}/com.browserbridge`], { detached: true, stdio: 'ignore' }).unref();
     } else if (process.platform === 'win32') {
       spawn('cmd', ['/c', 'schtasks /end /tn BrowserBridge'], { detached: true, stdio: 'ignore' }).unref();
     }

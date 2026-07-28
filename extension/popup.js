@@ -115,10 +115,12 @@ async function renderAgents() {
   for (const p of pend) {
     const row = document.createElement('div'); row.className = 'agent';
     const nm = document.createElement('span'); nm.className = 'nm pend'; nm.textContent = '⏳ ' + p.name;
+    // Route through the service worker, which SIGNS the decision with the pairing
+    // key (the bridge rejects any unsigned approval — no self-granting by code).
     const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = 'Approve';
-    ok.onclick = async () => { await fetch(bridgeBase() + '/oauth/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reqId: p.reqId, approve: 1 }) }); renderAgents(); };
+    ok.onclick = async () => { const r = await send('oauthDecision', { reqId: p.reqId, approve: true }); if (r && r.ok === false && r.error) nm.textContent = '⚠ ' + r.error; renderAgents(); };
     const no = document.createElement('button'); no.className = 'no'; no.textContent = 'Deny';
-    no.onclick = async () => { await fetch(bridgeBase() + '/oauth/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reqId: p.reqId, approve: 0 }) }); renderAgents(); };
+    no.onclick = async () => { await send('oauthDecision', { reqId: p.reqId, approve: false }); renderAgents(); };
     row.append(nm, ok, no); box.appendChild(row);
   }
   for (const a of agents) {

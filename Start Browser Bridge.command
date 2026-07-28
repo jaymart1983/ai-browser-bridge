@@ -1,7 +1,7 @@
 #!/bin/bash
 # Double-click to start Browser Bridge (and re-enable auto-start at login).
 DIR="$(cd "$(dirname "$0")" && pwd)"
-LABEL="com.aibrowserbridge"
+LABEL="com.browserbridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 if [ ! -f "$PLIST" ]; then
   # First run or never installed → do a full install (downloads the pinned Node).

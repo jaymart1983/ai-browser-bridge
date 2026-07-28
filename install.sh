@@ -10,7 +10,7 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE="$DIR/bridge"
-LABEL="com.aibrowserbridge"
+LABEL="com.browserbridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 RUNTIME="$DIR/runtime"
 NODE="$RUNTIME/node"

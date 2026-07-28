@@ -5,7 +5,7 @@
 import { state, save } from './state.mjs';
 import { PERMISSIONS } from './rules.mjs';
 import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, uploadModule, deleteModule } from './modules.mjs';
-import { listAgents, listPending, listStale, revokeAgent, removeClient, applyDecision } from './oauth.mjs';
+import { listAgents, listPending, listStale, revokeAgent, removeClient } from './oauth.mjs';
 import { pairingStatus } from './pairing.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -130,11 +130,13 @@ function configPage() {
       <div>authorized ${esc(fmtWhen(a.created))} · last used ${a.lastUsed ? esc(fmtWhen(a.lastUsed)) : 'never'}</div>
     </td>
     <td><form method=POST action="/config"><input type=hidden name=action value=revoke><input type=hidden name=client_id value="${esc(a.client_id)}"><button class=bad>Revoke</button></form></td></tr>`).join('') : '<tr><td colspan=3 class="mut">No authorized agents.</td></tr>';
+  // Pending requests are shown here but can ONLY be approved from the extension
+  // popup (a signed action from the paired browser). The control panel is served
+  // over unauthenticated loopback, so approving here would let any local process
+  // self-grant — we deliberately don't offer it.
   const pendRows = pending.map((p) => `<tr><td>⏳ <b>${esc(p.name)}</b> <span class="tag off">pending</span></td>
-    <td class="mut" style="font-size:12px">${p.origin ? `callback ${esc(p.origin)}<br>` : ''}awaiting your approval</td>
-    <td class="row">
-    <form method=POST action="/config"><input type=hidden name=action value=approve><input type=hidden name=reqId value="${esc(p.reqId)}"><button class=primary>Approve</button></form>
-    <form method=POST action="/config"><input type=hidden name=action value=deny><input type=hidden name=reqId value="${esc(p.reqId)}"><button>Deny</button></form></td></tr>`).join('');
+    <td class="mut" style="font-size:12px">${p.origin ? `callback ${esc(p.origin)}<br>` : ''}awaiting approval</td>
+    <td class="mut" style="font-size:12px">Approve in the extension popup (● badge)</td></tr>`).join('');
   const stale = listStale();
   const staleRows = stale.map((s) => `<tr>
     <td><span class="mut">${esc(s.name)}</span> <span class="tag">stale</span></td>
@@ -316,11 +318,12 @@ export async function uiRoutes(req, res, url) {
   if (req.method === 'GET' && p === '/config') { htmlRes(res, configPage()); return true; }
   if (req.method === 'POST' && p === '/config') {
     const { form } = await readBody(req);
+    // NOTE: no approve/deny here — OAuth consent is approved only from the extension
+    // popup, signed by the paired browser (see /oauth/decision). Approving over the
+    // unauthenticated control-plane would let any local process self-grant.
     if (form.action === 'revoke' && form.client_id) revokeAgent(String(form.client_id));
     else if (form.action === 'remove' && form.client_id) removeClient(String(form.client_id));
-    else if ((form.action === 'approve' || form.action === 'deny') && form.reqId) {
-      applyDecision(String(form.reqId), form.action === 'approve');
-    } else if (form.action === 'clear' && form.root) {
+    else if (form.action === 'clear' && form.root) {
       const ctx = getModuleCtx(); if (ctx && ctx.monitor && ctx.monitor.clearRoot) ctx.monitor.clearRoot(form.root === 'perm' ? 'perm' : 'tmp');
     }
     redirect(res, '/config'); return true;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remove the Browser Bridge login agent (stops auto-start and the running bridge).
 set -e
-LABEL="com.aibrowserbridge"
+LABEL="com.browserbridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 launchctl unload "$PLIST" 2>/dev/null || true

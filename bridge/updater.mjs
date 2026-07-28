@@ -26,7 +26,7 @@ import { state, save } from './state.mjs';
 const execFileP = promisify(execFile);
 const BRIDGE_DIR = dirname(fileURLToPath(import.meta.url)); // .../browser-bridge/bridge
 const REPO_DIR = dirname(BRIDGE_DIR);                        // install dir (git root for git installs)
-const SERVICE = 'com.aibrowserbridge';
+const SERVICE = 'com.browserbridge';
 const IS_WIN = process.platform === 'win32';
 
 function readRuntime() { try { return JSON.parse(readFileSync(join(REPO_DIR, 'runtime.json'), 'utf8')); } catch { return {}; } }

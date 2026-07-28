@@ -11,6 +11,7 @@
 
 import { randomBytes, createHash } from 'node:crypto';
 import { state, save } from './state.mjs';
+import { verifyDecision } from './pairing.mjs';
 
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const rand = (n = 32) => b64url(randomBytes(n));
@@ -193,15 +194,8 @@ function decide(reqId, approve) {
   return { ok: true };
 }
 
-// Public: apply a consent decision (used by the /oauth/decision route AND the
-// Config page). Records the grant on approve; returns the agent redirect (if any).
-export function applyDecision(reqId, approve) {
-  const p = pending.get(reqId);
-  const r = decide(reqId, approve);
-  if (!r.ok) return { ok: false };
-  if (approve && p) { createGrant(p); deliverCodeToCallback(p); }
-  return { ok: true, redirect: finalRedirect(p) };
-}
+// (Removed applyDecision — the only way to apply a consent decision is the
+// signature-gated /oauth/decision route, so no unsigned code path can approve.)
 
 // --- Consent page ------------------------------------------------------------
 // Deliberately minimal. Approval happens in the EXTENSION (the toolbar icon shows
@@ -333,11 +327,15 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     html(res, 200, consentPage(p)); return true;
   }
 
-  // Consent decision (from the page OR the extension popup).
+  // Consent decision — MUST be signed by a linked browser's pairing key (only the
+  // paired extension, i.e. a human clicking Approve, holds one). This blocks any
+  // unsigned local process from approving its own grant. No auto-approval.
   if (req.method === 'POST' && path === '/oauth/decision') {
     const { form, json: jb } = await readBody(req);
     const reqId = form.reqId || jb.reqId;
     const approve = String(form.approve ?? jb.approve) === '1' || form.approve === true || jb.approve === true;
+    const mac = form.mac || jb.mac;
+    if (!verifyDecision(reqId, approve, mac)) { json(res, 403, { error: 'approval must be signed by the paired browser (approve in the extension popup)' }); return true; }
     const p = pending.get(reqId);
     const r = decide(reqId, approve);
     if (!r.ok) { json(res, 400, { error: r.error }); return true; }
