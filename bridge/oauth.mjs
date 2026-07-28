@@ -250,11 +250,14 @@ function finalRedirect(p) {
 function deliverCodeToCallback(p) {
   try {
     const loc = finalRedirect(p);
-    if (!loc) return;
+    if (!loc) { console.log('[oauth] deliver: no redirect for', p && p.client_name); return; }
     const u = new URL(loc);
-    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) return;
-    fetch(loc, { redirect: 'manual' }).catch(() => {});
-  } catch { /* ignore */ }
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) { console.log('[oauth] deliver: non-loopback callback', u.host); return; }
+    console.log('[oauth] delivering code to', u.origin + u.pathname, 'for', p.client_name);
+    fetch(loc, { redirect: 'manual' })
+      .then((r) => console.log('[oauth] callback responded', r.status, 'for', p.client_name))
+      .catch((e) => console.log('[oauth] callback delivery FAILED for', p.client_name, '->', String((e && e.message) || e)));
+  } catch (e) { console.log('[oauth] deliver threw:', e && e.message); }
 }
 
 // --- Main router: returns true if it handled the request ---------------------
@@ -325,6 +328,7 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     // a grant already exists: a local process that merely learned the client_id
     // would otherwise be able to obtain a token without the user noticing.
     pending.set(reqId, p);
+    console.log('[oauth] authorize', p.client_name, p.client_id, '-> redirect', p.redirect_uri);
     pingPending(); // new request → light up the extension badge
     html(res, 200, consentPage(p)); return true;
   }
@@ -363,14 +367,15 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     const gt = form.grant_type;
     if (gt === 'authorization_code') {
       const rec = codes.get(form.code);
-      if (!rec || rec.exp < now()) { json(res, 400, { error: 'invalid_grant' }); return true; }
+      if (!rec || rec.exp < now()) { console.log('[oauth] token: bad/expired code (present?', !!rec, ')'); json(res, 400, { error: 'invalid_grant' }); return true; }
       codes.delete(form.code); // single-use
-      if (rec.redirect_uri && form.redirect_uri && rec.redirect_uri !== form.redirect_uri) { json(res, 400, { error: 'invalid_grant' }); return true; }
-      if (!form.code_verifier || sha256(form.code_verifier) !== rec.code_challenge) { json(res, 400, { error: 'invalid_grant', error_description: 'PKCE failed' }); return true; }
+      if (rec.redirect_uri && form.redirect_uri && rec.redirect_uri !== form.redirect_uri) { console.log('[oauth] token: redirect_uri mismatch code=', rec.redirect_uri, 'req=', form.redirect_uri); json(res, 400, { error: 'invalid_grant' }); return true; }
+      if (!form.code_verifier || sha256(form.code_verifier) !== rec.code_challenge) { console.log('[oauth] token: PKCE failed for', rec.name); json(res, 400, { error: 'invalid_grant', error_description: 'PKCE failed' }); return true; }
       const access = rand(32), refresh = rand(32);
       state.tokens[access] = { client_id: rec.client_id, resource: rec.resource, exp: now() + ACCESS_TTL_MS };
       state.refresh[refresh] = { client_id: rec.client_id, resource: rec.resource };
       save();
+      console.log('[oauth] token ISSUED for', rec.name, rec.client_id);
       json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: Math.floor(ACCESS_TTL_MS / 1000), refresh_token: refresh, scope: 'browser' });
       return true;
     }
