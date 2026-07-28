@@ -1,6 +1,6 @@
 {
   "name": "browser-bridge",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Local bridge that relays commands from AI/CLI tools to the Browser Bridge extension over a loopback WebSocket.",
   "type": "module",
   "private": true,
