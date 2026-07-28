@@ -35,6 +35,7 @@ import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
+import { listClients, connectClient, disconnectClient } from './clients.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -242,6 +243,17 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/update/config') {
     return readJsonBody(req).then((b) => sendJson(res, 200, setAutoUpdate(!!(b && b.autoUpdate))));
+  }
+  // Connect AI agents: detect installed MCP clients and write/remove the bridge's
+  // MCP entry into each one's own config (loopback + user-driven only).
+  if (req.method === 'GET' && url.pathname === '/bridge/clients') {
+    return sendJson(res, 200, { clients: listClients() });
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/clients/connect') {
+    return readJsonBody(req).then((b) => sendJson(res, 200, b && b.id ? connectClient(String(b.id)) : { ok: false, error: 'id required' }));
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/clients/disconnect') {
+    return readJsonBody(req).then((b) => sendJson(res, 200, b && b.id ? disconnectClient(String(b.id)) : { ok: false, error: 'id required' }));
   }
 
   if (url.pathname === COMMAND_PATH) {

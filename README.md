@@ -40,42 +40,37 @@ navigate, control, and record a chosen set of tabs.
 - Google Chrome or another Chromium browser
 - An MCP-capable agent
 
-## Install (no prerequisites)
+## Install (one command, no prerequisites)
 
-You do not need Node or anything else installed. The installer downloads the latest
-release, fetches a pinned Node runtime, and starts the bridge.
+You do not need Node or anything else installed. Paste one line into a terminal —
+it downloads the latest release, fetches a pinned Node runtime, and starts the
+bridge. Fetched with curl/PowerShell (not a browser), so macOS Gatekeeper /
+Windows SmartScreen do not flag it:
 
-### One command in a terminal (recommended — no security prompt)
+**macOS**
+```
+curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash
+```
 
-Because these are fetched with curl/PowerShell (not a browser), macOS Gatekeeper /
-Windows SmartScreen do not flag them:
+**Windows** (PowerShell)
+```
+irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex
+```
 
-- macOS: `curl -fsSL https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.sh | bash`
-- Windows: `irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex`
+It installs to a Browser Bridge folder (`~/Applications/Browser Bridge` on macOS,
+`%LOCALAPPDATA%\Programs\Browser Bridge` on Windows) and starts the bridge in the
+background at login. The control panel is at http://127.0.0.1:8787.
 
-Each installs to a Browser Bridge folder (`~/Applications/Browser Bridge` on macOS,
-`%LOCALAPPDATA%\Programs\Browser Bridge` on Windows), fetches a pinned Node runtime,
-and starts the bridge.
+Then, one time:
 
-### Or download and double-click
-
-Grab the installer for your OS from the
-[latest release](https://github.com/jaymart1983/browser-bridge/releases/latest):
-
-- **macOS** — download `Install-Browser-Bridge-macOS-*.zip`; it expands to
-  **`Install Browser Bridge.command`**. Because it's downloaded and not
-  Apple-notarized, macOS will say it "cannot be verified." To allow it: try to open
-  it once, then go to **System Settings → Privacy & Security** and click
-  **"Open Anyway"**, then Open. (This is a one-time step per download.)
-- **Windows** — download `Install-Browser-Bridge-Windows-*.cmd` and double-click; if
-  SmartScreen warns, click "More info" → "Run anyway."
-
-Then load the extension (one time): open `chrome://extensions`, turn on Developer
-mode, click Load unpacked, and select the `extension` folder inside the install
-directory (the installer opens it for you). Click **Link** in the extension popup.
-
-To start or stop the bridge later, double-click **Start Browser Bridge** or
-**Stop Browser Bridge** in the install folder.
+1. **Load the extension** — open `chrome://extensions`, turn on Developer mode,
+   click **Load unpacked**, and select the `extension` folder inside the install
+   directory. Click **Link** in the extension popup.
+2. **Connect your agents** — open the control panel (http://127.0.0.1:8787/config)
+   and use the **Connect AI agents** tiles. The bridge detects installed clients
+   (Claude Desktop, Claude Code, OpenCode, Codex) and writes the MCP config for
+   each one you pick. Restart that app, then click **Approve** in the extension
+   popup. No CLI, no hand-editing config files.
 
 ## Setup from source (developers)
 

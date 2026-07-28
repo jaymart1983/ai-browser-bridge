@@ -65,27 +65,8 @@ for (const os of ['macos', 'windows']) {
 }
 rmSync(STAGE, { recursive: true, force: true });
 
-// Double-click installers (users download ONE of these, not the app zip).
-//  - macOS: a .command inside a zip. A raw downloaded .command loses its execute
-//    bit and won't run; a zip preserves +x. (Gatekeeper still needs right-click →
-//    Open once — that's unavoidable until the installer is signed + notarized.)
-//  - Windows: a raw .cmd is double-clickable as-is.
-const instMac = join(DIST, 'installer-macos');
-rmSync(instMac, { recursive: true, force: true });
-mkdirSync(instMac, { recursive: true });
-copyFileSync(join(ROOT, 'bootstrap.sh'), join(instMac, 'Install Browser Bridge.command'));
-execFileSync('chmod', ['+x', join(instMac, 'Install Browser Bridge.command')]);
-copyFileSync(join(ROOT, 'READ ME FIRST (macOS).txt'), join(instMac, 'READ ME FIRST (macOS).txt'));
-const macInstallerZip = join(DIST, `Install-Browser-Bridge-macOS-v${version}.zip`);
-rmSync(macInstallerZip, { force: true });
-execFileSync('zip', ['-q', '-j', '-X', macInstallerZip,
-  join(instMac, 'Install Browser Bridge.command'),
-  join(instMac, 'READ ME FIRST (macOS).txt')]);
-rmSync(instMac, { recursive: true, force: true });
-console.log('  wrote ' + macInstallerZip);
+// No double-click installers. Install is the one-line curl/irm command (see the
+// release notes / README) — it must run in a terminal anyway to strip quarantine
+// and ad-hoc sign the tray, so a downloaded .command/.cmd added no value.
 
-writeFileSync(join(DIST, `Install-Browser-Bridge-Windows-v${version}.cmd`),
-  '@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/jaymart1983/browser-bridge/main/bootstrap.ps1 | iex"\r\npause\r\n');
-console.log('  wrote ' + join(DIST, `Install-Browser-Bridge-Windows-v${version}.cmd`));
-
-console.log('Done. Attach all dist/* artifacts to the GitHub Release for v' + version + '.');
+console.log('Done. Attach the two platform zips to the GitHub Release for v' + version + '.');

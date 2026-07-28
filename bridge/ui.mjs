@@ -184,6 +184,47 @@ function configPage() {
       <form method=POST action="/config"><input type=hidden name=action value=clear><input type=hidden name=root value=perm><button>Clear Perm</button></form>
     </div></div>
 
+    <h2>Connect AI agents <span class="mut" style="font-size:12px;font-weight:400">write the bridge into each app's MCP config for you</span></h2>
+    <div class="card"><div id="cliBox" class="mut">Detecting…</div></div>
+    <script>
+    (function(){
+      function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+      var box=document.getElementById('cliBox');
+      function tile(c){
+        var badge = !c.installed ? '<span class="tag off">not detected</span>'
+          : c.configured ? '<span class="tag on">connected</span>'
+          : '<span class="tag off">not connected</span>';
+        var warn = (c.usesShim && c.installed && !c.npxFound)
+          ? '<div class="mut" style="font-size:11px;color:var(--warn);margin-top:2px">needs Node/npx installed to run</div>' : '';
+        var btn = !c.installed ? ''
+          : c.configured
+            ? '<button data-act="disconnect" data-id="'+esc(c.id)+'">Disconnect</button>'
+            : '<button class="primary" data-act="connect" data-id="'+esc(c.id)+'">Connect</button>';
+        return '<div class="card row" style="align-items:flex-start">'
+          +'<div style="flex:1"><b>'+esc(c.name)+'</b> '+badge
+          +'<div class="mut" style="font-size:11px">'+esc(c.transport==='http-native'?'native OAuth':(c.transport==='remote'?'native remote MCP':'via mcp-remote shim'))+' · '+esc(c.file)+'</div>'+warn+'</div>'
+          +btn+'</div>';
+      }
+      function render(list){
+        if(!list||!list.length){box.innerHTML='<span class="mut">No known AI agents found.</span>';return;}
+        box.innerHTML = list.map(tile).join('')
+          +'<div class="mut" style="font-size:12px;margin-top:8px">After connecting: <b>restart that app</b>, then approve the connection in the Browser Bridge <b>extension popup</b> (● badge on the toolbar icon).</div>';
+        Array.prototype.forEach.call(box.querySelectorAll('button[data-act]'),function(b){
+          b.onclick=async function(){
+            var act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
+            b.disabled=true; b.textContent=act==='connect'?'Connecting…':'Removing…';
+            var r=await (await fetch('/bridge/clients/'+act,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id})})).json();
+            if(r&&r.warn) alert(r.warn);
+            if(r&&r.ok===false&&r.error) alert(r.error);
+            load();
+          };
+        });
+      }
+      async function load(){ try{ render((await (await fetch('/bridge/clients',{cache:'no-store'})).json()).clients); }catch{ box.innerHTML='<span class="mut">Unavailable.</span>'; } }
+      load();
+    })();
+    </script>
+
     <h2>Updates <span class="mut" style="font-size:12px;font-weight:400">install the latest release from GitHub</span></h2>
     <div class="card"><div id="updBox" class="mut">Loading…</div></div>
     <script>
