@@ -45,7 +45,7 @@ function connect() {
     // to a linked browser (and route/activate correctly with several linked).
     let ident = {};
     try { ident = await chrome.storage.local.get(['browserId', 'browserName']); } catch {}
-    safeSend({ type: 'hello', role: 'extension', version: '0.1.0', browserId: ident.browserId || null, browserName: ident.browserName || null });
+    safeSend({ type: 'hello', role: 'extension', version: chrome.runtime.getManifest().version, browserId: ident.browserId || null, browserName: ident.browserName || null });
   });
 
   ws.addEventListener('message', (ev) => {

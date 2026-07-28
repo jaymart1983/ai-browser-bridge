@@ -23,7 +23,9 @@
 //   chrome.runtime messaging. The alarm-based keepalive resurrects both after
 //   the SW is killed.
 
-const VERSION = '0.1.0';
+// Single source of truth: the manifest version (bumped at release). Never hardcode
+// a version here — it drifts from manifest.json and misreports in the popup.
+const VERSION = chrome.runtime.getManifest().version;
 const DEFAULT_BRIDGE_URL = 'ws://127.0.0.1:8787/agent';
 
 // Auth model: pairing ONLY. The one-time "Link" ECDH handshake derives a shared
