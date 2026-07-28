@@ -18,9 +18,9 @@
 //
 // See RELEASING.md for the full versioning + publishing flow.
 
-import { rmSync, mkdirSync, cpSync, existsSync, readFileSync, copyFileSync, writeFileSync } from 'node:fs';
+import { rmSync, mkdirSync, cpSync, existsSync, readFileSync, copyFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -45,6 +45,40 @@ for (const rel of tracked) {
   const dst = join(STAGE, rel);
   mkdirSync(dirname(dst), { recursive: true });
   copyFileSync(src, dst);
+}
+
+// GUARD: every relative import in the STAGED code must resolve to a file that
+// actually made it into the payload. This catches an untracked / uncommitted source
+// file (e.g. a new .mjs the shipped server imports) BEFORE it goes out as a
+// crash-looping zip — exactly the "clients.mjs missing from the zip" bug. We abort
+// and delete the stage rather than publish a broken build.
+function missingImportsUnder(dir) {
+  const miss = [];
+  const walk = (d) => {
+    if (!existsSync(d)) return;
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.name === 'node_modules') continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!/\.(mjs|cjs|js)$/.test(e.name)) continue;
+      const text = readFileSync(p, 'utf8');
+      const re = /(?:from|import)\s*\(?\s*['"](\.\.?\/[^'"]+\.(?:mjs|cjs|js|json))['"]/g;
+      let m;
+      while ((m = re.exec(text))) {
+        if (!existsSync(resolve(dirname(p), m[1]))) miss.push(`${relative(STAGE, p)} → ${m[1]}`);
+      }
+    }
+  };
+  walk(dir);
+  return miss;
+}
+const missing = [...missingImportsUnder(join(STAGE, 'bridge')), ...missingImportsUnder(join(STAGE, 'extension'))];
+if (missing.length) {
+  rmSync(STAGE, { recursive: true, force: true });
+  console.error('Release ABORTED — shipped code imports files not present in the build (untracked/uncommitted?):');
+  for (const x of missing) console.error('  - ' + x);
+  console.error('Fix: `git add` the missing file(s), then rebuild.');
+  process.exit(1);
 }
 
 // Bundle the WHOLE bridge/node_modules — the deps (ws, systray2 + its fs-extra
