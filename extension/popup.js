@@ -54,7 +54,33 @@ async function refresh() {
   $('linkBtn').disabled = !s.wsConnected;
   $('linkBtn').title = !s.wsConnected ? 'Start the bridge first' : paired ? 'Unpair this browser' : 'Pair this browser with this local bridge';
 
-  if (s.wsConnected) { renderAgents(); renderNav(); }
+  if (s.wsConnected) { renderAgents(); renderNav(); renderUpdate(); }
+}
+
+// Show a prompt when a newer release is available. Works for both install channels:
+// zip installs expose `updateAvailable` + `latest`; git installs expose `canFastForward` + `tag`.
+// The Update button hits the bridge's apply endpoint, which downloads/fast-forwards and restarts.
+async function renderUpdate() {
+  const sec = $('updateSection');
+  if (!sec) return;
+  let d;
+  try { d = await (await fetch(bridgeBase() + '/bridge/update', { cache: 'no-store' })).json(); } catch { sec.classList.add('hidden'); return; }
+  const can = d && (d.channel === 'zip' ? d.updateAvailable : d.canFastForward);
+  if (!can) { sec.classList.add('hidden'); return; }
+  const label = d.channel === 'zip' ? ('v' + (d.latest || '')) : (d.tag || 'latest');
+  $('updateText').innerHTML = 'Update available → <b>' + label + '</b>';
+  sec.classList.remove('hidden');
+  const btn = $('updateBtn');
+  btn.disabled = false;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    $('updateText').textContent = 'Updating & restarting…';
+    try {
+      const r = await (await fetch(bridgeBase() + '/bridge/update/apply', { method: 'POST' })).json();
+      if (r && r.ok === false) { $('updateText').textContent = '⚠ ' + (r.error || 'Update failed'); btn.disabled = false; }
+      else { setTimeout(refresh, 5000); } // bridge restarts; refresh reconnects
+    } catch { $('updateText').textContent = '⚠ Update failed'; btn.disabled = false; }
+  };
 }
 
 async function renderAgents() {

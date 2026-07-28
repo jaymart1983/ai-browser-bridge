@@ -184,7 +184,7 @@ function configPage() {
       <form method=POST action="/config"><input type=hidden name=action value=clear><input type=hidden name=root value=perm><button>Clear Perm</button></form>
     </div></div>
 
-    <h2>Updates <span class="mut" style="font-size:12px;font-weight:400">fast-forward this install from GitHub</span></h2>
+    <h2>Updates <span class="mut" style="font-size:12px;font-weight:400">install the latest release from GitHub</span></h2>
     <div class="card"><div id="updBox" class="mut">Loading…</div></div>
     <script>
     (function(){
@@ -193,21 +193,34 @@ function configPage() {
       function render(d){
         if(!d){box.innerHTML='<span class="mut">Unavailable.</span>';return;}
         if(d.error){box.innerHTML='<span class="mut">Update check unavailable: '+esc(d.error)+'</span>';return;}
-        if(d.channel==='zip'){box.innerHTML='<div class="mut" style="font-size:13px">Bridge <b>v'+esc(d.version||'?')+'</b> — installed from a downloaded release. Update by downloading the latest release zip (see RELEASING.md).</div>';return;}
-        var status = d.canFastForward ? '<b style="color:var(--accent)">Update available → '+esc(d.tag||'')+'</b> ('+d.behind+' commit'+(d.behind===1?'':'s')+' behind)'
-          : !d.tag ? '<b style="color:var(--ok)">Up to date</b> <span class="mut">— no releases published yet</span>'
-          : d.atLatest ? '<b style="color:var(--ok)">Up to date</b> — on '+esc(d.tag||'')
-          : (d.ahead>0) ? '<b style="color:var(--warn)">Ahead of latest release ('+esc(d.tag||'')+')</b> — auto-update paused'
-          : !d.clean ? '<b style="color:var(--warn)">Local changes present</b> — auto-update paused'
-          : '<b style="color:var(--warn)">Update to '+esc(d.tag||'')+' not fast-forwardable</b>';
+        // Both install channels get the same UI: status, an Update & restart button when
+        // an update is applicable, and the auto-update toggle. The apply/config endpoints
+        // route to the right implementation (git fast-forward vs. zip download+swap).
+        var isZip = d.channel==='zip';
+        var canApply = isZip ? d.updateAvailable : d.canFastForward;
+        var status;
+        if(isZip){
+          status = d.updateAvailable ? '<b style="color:var(--accent)">Update available → v'+esc(d.latest||'')+'</b>'
+            : d.latest ? '<b style="color:var(--ok)">Up to date</b> — on v'+esc(d.version||'?')
+            : '<b style="color:var(--ok)">Up to date</b> <span class="mut">— no releases published yet</span>';
+        } else {
+          status = d.canFastForward ? '<b style="color:var(--accent)">Update available → '+esc(d.tag||'')+'</b> ('+d.behind+' commit'+(d.behind===1?'':'s')+' behind)'
+            : !d.tag ? '<b style="color:var(--ok)">Up to date</b> <span class="mut">— no releases published yet</span>'
+            : d.atLatest ? '<b style="color:var(--ok)">Up to date</b> — on '+esc(d.tag||'')
+            : (d.ahead>0) ? '<b style="color:var(--warn)">Ahead of latest release ('+esc(d.tag||'')+')</b> — auto-update paused'
+            : !d.clean ? '<b style="color:var(--warn)">Local changes present</b> — auto-update paused'
+            : '<b style="color:var(--warn)">Update to '+esc(d.tag||'')+' not fast-forwardable</b>';
+        }
+        var meta = isZip
+          ? 'Bridge <b>v'+esc(d.version||'?')+'</b> · downloaded release ('+esc(d.platform||'')+')'+(d.latest?' · latest release v'+esc(d.latest):'')+(d.repo?'<br>source '+esc(d.repo):'')
+          : 'Bridge <b>v'+esc(d.version||'?')+'</b> · '+esc(d.branch||'')+' @ '+esc(d.sha||'?')+(d.tag?' · latest release '+esc(d.tag)+' @ '+esc(d.tagSha||'?'):'')+'<br>source '+esc(d.remoteUrl||'');
         box.innerHTML =
           '<div class="row"><span class="grow">'+status+'</span>'
             +'<button id="chk">Check now</button>'
-            +(d.canFastForward?'<button id="apply" class="primary">Update &amp; restart</button>':'')+'</div>'
-          +'<div class="mut" style="font-size:12px;margin-top:6px">Bridge <b>v'+esc(d.version||'?')+'</b> · '+esc(d.branch||'')+' @ '+esc(d.sha||'?')
-            +(d.tag?' · latest release '+esc(d.tag)+' @ '+esc(d.tagSha||'?'):'')+'<br>source '+esc(d.remoteUrl||'')+'</div>'
+            +(canApply?'<button id="apply" class="primary">Update &amp; restart</button>':'')+'</div>'
+          +'<div class="mut" style="font-size:12px;margin-top:6px">'+meta+'</div>'
           +'<label class="row" style="margin-top:10px;gap:8px;cursor:pointer"><input type="checkbox" id="auto"'+(d.autoUpdate?' checked':'')+'> '
-            +'<span>Automatically install the latest release when a clean fast-forward is available</span></label>';
+            +'<span>Automatically install the latest release when available</span></label>';
         var chk=document.getElementById('chk'); if(chk) chk.onclick=async function(){box.innerHTML='<span class="mut">Checking GitHub…</span>';render(await (await fetch('/bridge/update/check',{method:'POST'})).json());};
         var ap=document.getElementById('apply'); if(ap) ap.onclick=async function(){if(!confirm('Update the bridge and restart it now?'))return;box.innerHTML='<span class="mut">Updating &amp; restarting… this page will reconnect.</span>';var r=await (await fetch('/bridge/update/apply',{method:'POST'})).json();if(!r.ok){box.innerHTML='<span class="mut">Update failed: '+esc(r.error||'')+'</span>';}else{setTimeout(function(){location.reload();},4000);}};
         var au=document.getElementById('auto'); if(au) au.onchange=async function(){await fetch('/bridge/update/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({autoUpdate:au.checked})});load();};
