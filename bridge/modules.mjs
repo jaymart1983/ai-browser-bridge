@@ -41,12 +41,18 @@ export async function loadModules() {
     const mod = registry.get(id);
     if (mod) registerDestinations(mod);
   }
-  // Auto-enable modules named in BRIDGE_AUTOENABLE (embedder-declared, e.g. a host app's own
-  // capability module) so a fresh install has them live without a manual toggle in the UI.
-  const autos = (process.env.BRIDGE_AUTOENABLE || '').split(',').map((s) => s.trim()).filter(Boolean);
-  for (const id of autos) {
-    if (registry.has(id) && !isEnabled(id)) setEnabled(id, true);
+  // One-time auto-enable: a module declares `autoEnable: true` in its own manifest to
+  // go live on first install without a manual toggle. Purely module-driven — the bridge
+  // holds no module names. Gated on `modulesSeen` so it fires ONCE per module: if the
+  // user later disables it, it stays disabled (we never re-enable a seen module).
+  state.modulesSeen = state.modulesSeen || [];
+  let seenChanged = false;
+  for (const [id, mod] of registry) {
+    if (state.modulesSeen.includes(id)) continue;
+    state.modulesSeen.push(id); seenChanged = true;
+    if (mod.autoEnable && !isEnabled(id)) setEnabled(id, true);
   }
+  if (seenChanged) save();
 }
 
 // Write a new/updated module file and reload. `code` is arbitrary JS that will

@@ -79,6 +79,7 @@ export default {
   name: 'Deep Research',
   version: '0.1.0',
   description: 'Let any authorized agent read/navigate/control and record a chosen set of research tabs, and query what was captured.',
+  autoEnable: true, // go live on first install without a manual toggle (one-time; a later manual disable sticks)
   artifacts: { sources: [], destinations: [{ id: DEST, name: 'Research Enabled Tabs', kind: 'dynamic', patterns: [] }] },
   baseRules: [{ id: 'research-base', source: 'Any Agent', destination: DEST, permissions: ['read', 'write', 'control', 'record'] }],
   navLinks: [{ label: 'Deep Research', href: '/modules/research' }],

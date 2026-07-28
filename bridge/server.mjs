@@ -44,6 +44,12 @@ const COMMAND_PATH = '/command';
 const COMMAND_TIMEOUT_MS = Number(process.env.BRIDGE_TIMEOUT_MS || 30000);
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB (screenshots/HTML can be large)
 
+// The bridge's own version, read from its package.json. Reported by /health.
+const BRIDGE_VERSION = (() => {
+  try { return JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8')).version || null; }
+  catch { return null; }
+})();
+
 // Linked browsers can each hold an open agent socket. Commands are relayed to the
 // ACTIVE browser only; the others stay connected (for status + fast switching).
 const agentSockets = new Map(); // browserId -> ws
@@ -135,10 +141,8 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'browser-bridge',
-      // An embedder stamps the bundle version it shipped via BRIDGE_BUNDLE_VERSION.
-      // A standalone bridge (or an older bundle that predates this field) reports null, which the
-      // embedder treats as "not my bundled bridge / unknown version".
-      version: process.env.BRIDGE_BUNDLE_VERSION || null,
+      // The bridge reports its OWN version (from package.json) — no host-app coupling.
+      version: BRIDGE_VERSION,
       agentConnected: agentConnected(),
       commandPath: COMMAND_PATH,
       agentPath: AGENT_PATH,
@@ -448,12 +452,9 @@ wss.on('connection', (ws) => {
     // we derive the shared HMAC key for THAT browser and return ours.
     if (msg.type === 'pair_init' && typeof msg.pub === 'string') {
       try {
-        // Hands-free auto-pair: when the embedder sets BRIDGE_AUTOPAIR_TOKEN, the
-        // extension it launched carries that one-time token in pair_init, so it links without a
-        // manual "Link" click. When the token is set we REQUIRE a match — so only the embedder's
-        // extension can pair, not any loopback extension. Standalone bridges (no env) accept as before.
-        const autopair = process.env.BRIDGE_AUTOPAIR_TOKEN || '';
-        if (autopair && msg.token !== autopair) { log('pair_init rejected (bad/missing autopair token)'); return; }
+        // Pairing is a deliberate human action: the user clicks "Link" in the extension
+        // popup, which sends this pair_init. There is no hands-free/auto-pair path — no
+        // process can link a browser on the user's behalf.
         const bid = typeof msg.browserId === 'string' && msg.browserId ? msg.browserId : (ws._browserId || null);
         const pub = pairInit(msg.pub, bid, msg.browserName);
         if (bid) { ws._browserId = bid; agentSockets.set(bid, ws); }

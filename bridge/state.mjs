@@ -6,9 +6,10 @@ import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// BRIDGE_STATE_FILE lets an embedder keep the state OUTSIDE the bridge dir so
-// pairing keys + OAuth grants survive the bridge source being re-extracted on each update.
-const FILE = process.env.BRIDGE_STATE_FILE || join(dirname(fileURLToPath(import.meta.url)), '.bridge-state.json');
+// State lives beside the bridge source (0600). It is gitignored, so both update
+// channels preserve it: the git channel fast-forwards tracked files only, and the
+// zip channel swaps tracked files in place — neither touches this file.
+const FILE = join(dirname(fileURLToPath(import.meta.url)), '.bridge-state.json');
 
 export const state = {
   clients: {},   // client_id -> { client_id, client_name, redirect_uris[], created }
@@ -22,6 +23,7 @@ export const state = {
 
   // Capability platform (the rule engine + modules).
   modulesEnabled: [],  // [moduleId] — which capability modules are active
+  modulesSeen: [],     // [moduleId] — modules discovered at least once; gates one-time autoEnable so a manual disable sticks
   rules: [],           // ordered, top-down first-match: [{ id, action:'allow'|'deny', source, destination, permissions[], enabled, moduleId? }]
   destinations: [],    // user-created destination artifacts: [{ id, name, patterns[] }]
   artifacts: {},       // moduleId -> { destinations: { destId: { patterns[], contents[] } }, sources: {…} }
@@ -32,7 +34,7 @@ export function load() {
     if (existsSync(FILE)) {
       const d = JSON.parse(readFileSync(FILE, 'utf8'));
       for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts', 'browsers']) if (d[k]) state[k] = d[k];
-      for (const k of ['modulesEnabled', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
+      for (const k of ['modulesEnabled', 'modulesSeen', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
       if ('pairing' in d) state.pairing = d.pairing;
       if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;
       if ('autoUpdate' in d) state.autoUpdate = !!d.autoUpdate;
