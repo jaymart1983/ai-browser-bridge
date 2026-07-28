@@ -36,6 +36,7 @@ import { configureModules, loadModules, setDestinationContents, refreshModuleDes
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
+import { listTabActions, invokeTabAction } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -254,6 +255,18 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/clients/disconnect') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b && b.id ? disconnectClient(String(b.id)) : { ok: false, error: 'id required' }));
+  }
+  // Focused-tab actions: enabled modules expose per-tab actions (e.g. Deep Research
+  // "Record this tab") that the extension popup renders for the active tab. Loopback
+  // + user-driven; the invoke path performs the module's registered capability.
+  if (req.method === 'GET' && url.pathname === '/bridge/tab-actions') {
+    return listTabActions(url.searchParams.get('url') || '', url.searchParams.get('tabId')).then((actions) => sendJson(res, 200, { actions }));
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/tab-actions/invoke') {
+    return readJsonBody(req).then((b) => (b && b.moduleId && b.id
+      ? invokeTabAction(String(b.moduleId), String(b.id), b.tabId, b.url || '')
+      : Promise.resolve({ ok: false, error: 'moduleId and id required' })
+    )).then((r) => sendJson(res, 200, r));
   }
 
   if (url.pathname === COMMAND_PATH) {
@@ -698,6 +711,18 @@ function readEvents(key, root, since) {
   return { events, total: lines.length };
 }
 
+// Read one screenshot as base64 (for the MCP recording-review tools → image content).
+function readShot(key, root, n) {
+  const file = String(n).replace(/[^0-9]/g, '');
+  const base = MON_ROOTS[rootForKey(key, root)];
+  const dir = join(base, safeName(key), 'screenshots');
+  for (const ext of ['jpg', 'png']) {
+    const p = join(dir, file.padStart(5, '0') + '.' + ext);
+    if (existsSync(p) && p.startsWith(base)) return { mime: ext === 'png' ? 'image/png' : 'image/jpeg', base64: readFileSync(p).toString('base64') };
+  }
+  return null;
+}
+
 function serveShot(res, key, root, n) {
   const file = String(n).replace(/[^0-9]/g, '');
   const useRoot = rootForKey(key, root);
@@ -767,7 +792,7 @@ configureRules({ relayCommand });
 const moduleCtx = {
   relayCommand, state, save, resolveTabUrl,
   setDestinationContents, refreshModuleDestinations,
-  monitor: { listSessions, readEvents, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS },
+  monitor: { listSessions, readEvents, readShot, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS },
 };
 configureModules(moduleCtx);
 await loadModules();

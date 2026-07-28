@@ -158,6 +158,69 @@ export function allSources() {
   return out;
 }
 export function allDestinations() { return getDestinations(); }
+
+// --- Focused-tab actions -----------------------------------------------------
+// A module declares `tabActions: [{ id, uses?, labels:{on,off}, match? }]` to have
+// the extension popup surface a per-tab action (e.g. Deep Research "Record this
+// tab"). `uses` names a built-in EXTENSION CAPABILITY the bridge knows how to drive
+// (currently 'recording'); a module can instead implement `onTabAction(id, {tabId,
+// url}, ctx)` for fully custom behavior (the pure-module path). Optional
+// `tabActionState(id, {tabId,url}, ctx)` reports on/off for non-recording actions.
+// This is ADDITIVE — a module without `tabActions` is unaffected.
+function tabActionVisible(ta, url, mod) {
+  if (typeof mod.tabActionVisible === 'function') { try { return !!mod.tabActionVisible(ta.id, { url }); } catch { return false; } }
+  if (!/^https?:/i.test(url || '')) return false;      // only real web tabs
+  const m = ta.match;
+  if (!m || m === '*') return true;
+  const host = (() => { try { return new URL(url).host; } catch { return ''; } })();
+  const pats = Array.isArray(m) ? m : [m];
+  return pats.some((p) => p === '*' || p === url || (p.startsWith('*.') && (host === p.slice(2) || host.endsWith(p.slice(1)))));
+}
+
+async function recordingTabIds() {
+  try { return new Set(((await _ctx.relayCommand('monitor.list')) || []).map((m) => Number(m.tabId))); }
+  catch { return new Set(); }
+}
+
+export async function listTabActions(url, tabId) {
+  if (!_ctx) return [];
+  const tid = Number(tabId);
+  let rec = null; // lazily fetched only if a recording action is present
+  const out = [];
+  for (const id of state.modulesEnabled) {
+    const mod = registry.get(id);
+    for (const ta of (mod && mod.tabActions) || []) {
+      if (!tabActionVisible(ta, url, mod)) continue;
+      let on = false;
+      if (ta.uses === 'recording') { rec = rec || await recordingTabIds(); on = rec.has(tid); }
+      else if (typeof mod.tabActionState === 'function') { try { on = !!(await mod.tabActionState(ta.id, { tabId: tid, url }, _ctx)); } catch { on = false; } }
+      out.push({ moduleId: id, id: ta.id, label: (on ? ta.labels && ta.labels.on : ta.labels && ta.labels.off) || ta.id, on, uses: ta.uses || null });
+    }
+  }
+  return out;
+}
+
+export async function invokeTabAction(moduleId, actionId, tabId, url) {
+  if (!_ctx) return { ok: false, error: 'not ready' };
+  const mod = registry.get(moduleId);
+  if (!mod || !isEnabled(moduleId)) return { ok: false, error: 'module not enabled' };
+  const ta = (mod.tabActions || []).find((t) => t.id === actionId);
+  if (!ta) return { ok: false, error: 'unknown action' };
+  const tid = Number(tabId);
+  // Pure-module path: the module handles it however it likes.
+  if (typeof mod.onTabAction === 'function') {
+    try { const r = await mod.onTabAction(actionId, { tabId: tid, url }, _ctx); return { ok: true, ...(r || {}) }; }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  }
+  // Built-in capability: recording toggle.
+  if (ta.uses === 'recording') {
+    const on = (await recordingTabIds()).has(tid);
+    try { await _ctx.relayCommand(on ? 'monitor.stop' : 'monitor.start', { tabId: tid }); }
+    catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+    return { ok: true, on: !on };
+  }
+  return { ok: false, error: `no handler for capability "${ta.uses || 'none'}"` };
+}
 export function allNavLinks() {
   const out = [];
   for (const id of state.modulesEnabled) {

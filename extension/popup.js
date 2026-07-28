@@ -54,7 +54,43 @@ async function refresh() {
   $('linkBtn').disabled = !s.wsConnected;
   $('linkBtn').title = !s.wsConnected ? 'Start the bridge first' : paired ? 'Unpair this browser' : 'Pair this browser with this local bridge';
 
-  if (s.wsConnected) { renderAgents(); renderNav(); renderUpdate(); }
+  if (s.wsConnected) { renderTabActions(); renderAgents(); renderNav(); renderUpdate(); }
+}
+
+// Focused-tab actions: ask the bridge what enabled modules let you do with the tab
+// you're looking at (e.g. Deep Research "Record this tab") and render one-click
+// buttons. Reflects the current focused tab each time the popup opens.
+async function renderTabActions() {
+  const sec = $('tabActionsSection');
+  if (!sec) return;
+  let tab;
+  try { [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }); } catch { tab = null; }
+  if (!tab || !/^https?:/i.test(tab.url || '')) { sec.classList.add('hidden'); return; }
+  let actions = [];
+  try { actions = ((await (await fetch(bridgeBase() + '/bridge/tab-actions?url=' + encodeURIComponent(tab.url) + '&tabId=' + tab.id, { cache: 'no-store' })).json()).actions) || []; }
+  catch { sec.classList.add('hidden'); return; }
+  if (!actions.length) { sec.classList.add('hidden'); return; }
+  let host = tab.url; try { host = new URL(tab.url).host; } catch {}
+  $('tabActionsLabel').textContent = 'This tab · ' + host;
+  const box = $('tabActionsList');
+  box.innerHTML = '';
+  for (const a of actions) {
+    const row = document.createElement('div'); row.className = 'row'; row.style.marginBottom = '4px';
+    const b = document.createElement('button');
+    b.className = a.on ? '' : 'primary';
+    b.style.flex = '1';
+    b.textContent = a.label;
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await fetch(bridgeBase() + '/bridge/tab-actions/invoke', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moduleId: a.moduleId, id: a.id, tabId: tab.id, url: tab.url }) });
+      } catch {}
+      renderTabActions();
+    };
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+  sec.classList.remove('hidden');
 }
 
 // Show a prompt when a newer release is available. Works for both install channels:

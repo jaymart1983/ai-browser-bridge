@@ -62,6 +62,28 @@ function extractVehicles(events) {
   for (const e of events) if (e.kind === 'network' && typeof e.body === 'string' && e.body.length > 2) { try { scan(JSON.parse(e.body)); } catch {} }
   return [...out.values()];
 }
+// Turn a session's raw events into a compact, agent-readable review: counts, the
+// navigation trail, recent network calls (with a short JSON body preview), and the
+// screenshot numbers to fetch via research_view_screenshot.
+function summarizeRecording(sel, events, limit) {
+  const preview = (body) => {
+    if (typeof body !== 'string' || !body) return undefined;
+    try { const s = JSON.stringify(JSON.parse(body)); return s.length > 300 ? s.slice(0, 300) + '…' : s; }
+    catch { return body.length > 200 ? body.slice(0, 200) + '…' : body; }
+  };
+  const navigations = events.filter((e) => e.kind === 'navigation').map((e) => ({ ts: e.ts, url: e.url }));
+  const network = events.filter((e) => e.kind === 'network').map((e) => ({ ts: e.ts, method: e.method || 'GET', status: e.status, url: e.url, body: preview(e.body) }));
+  const screenshots = events.filter((e) => e.kind === 'screenshot').map((e) => Number(shotNum(e.file))).filter((n) => Number.isFinite(n));
+  const counts = { navigations: navigations.length, network: network.length, screenshots: screenshots.length, total: events.length };
+  return {
+    session: sel.id, title: sel.title, url: sel.url, recording: sel.active, counts,
+    navigations: navigations.slice(-limit),
+    network: network.slice(-limit),
+    screenshots,
+    hint: screenshots.length ? `Call research_view_screenshot with session "${sel.id}" and one of these numbers to see the page.` : 'No screenshots captured yet.',
+  };
+}
+
 function eventBadges(ev) {
   const out = [];
   if (ev.kind === 'network' && ev.body) {
@@ -91,12 +113,38 @@ export default {
 
   tools: {
     research_list_recordings: {
-      description: 'List Deep Research recording sessions (id, tab title/url, event count, size, whether recording).',
+      description: 'STEP 1 for reviewing a recorded page. Lists Deep Research recording sessions (a "recording" = everything captured while a tab was recorded: page navigations, network responses, and screenshots). Returns each session id (use it with research_read_recording / research_view_screenshot), tab title/url, event count, and whether it is still recording.',
       inputSchema: { type: 'object', properties: {} },
-      async handler(_a, ctx) { return ctx.monitor.listSessions().map((s) => ({ id: s.id, root: s.root, tabId: s.tabId, title: s.title, url: s.url, events: s.count, bytes: s.bytes, active: s.active })); },
+      async handler(_a, ctx) { return ctx.monitor.listSessions().map((s) => ({ id: s.id, tabId: s.tabId, title: s.title, url: s.url, events: s.count, recording: s.active })); },
+    },
+    research_read_recording: {
+      description: 'STEP 2: review what was captured in a recording. Returns the timeline — page navigations, network requests (method/status/url with a short JSON body preview), and the list of screenshot numbers. Pass a session id from research_list_recordings, or omit for the most recent. Then call research_view_screenshot to SEE any screenshot.',
+      inputSchema: { type: 'object', properties: { session: { type: 'string', description: 'session id from research_list_recordings; omit for most recent' }, limit: { type: 'integer', description: 'max timeline entries (default 100, newest kept)' } } },
+      async handler(args, ctx) {
+        const ss = ctx.monitor.listSessions();
+        const sel = args.session ? ss.find((s) => s.id === args.session || s.name === args.session) : ss[0];
+        if (!sel) return { error: 'no recording found. Record a tab first (Deep Research config, or the extension popup "Record this tab").' };
+        const { events } = ctx.monitor.readEvents(sel.name, sel.root, 0);
+        return summarizeRecording(sel, events, args.limit || 100);
+      },
+    },
+    research_view_screenshot: {
+      description: 'Return a captured screenshot from a recording AS AN IMAGE so you can see the page. Pass the session id and the screenshot number (from research_read_recording); omit number for the latest screenshot in that session.',
+      inputSchema: { type: 'object', properties: { session: { type: 'string' }, number: { type: 'integer', description: 'screenshot number; omit for the latest' } }, required: ['session'] },
+      async handler(args, ctx) {
+        const ss = ctx.monitor.listSessions();
+        const sel = ss.find((s) => s.id === args.session || s.name === args.session) || (!args.session ? ss[0] : null);
+        if (!sel) return { error: 'no such session' };
+        let n = args.number;
+        if (n == null) { const { events } = ctx.monitor.readEvents(sel.name, sel.root, 0); const shots = events.filter((e) => e.kind === 'screenshot').map((e) => shotNum(e.file)).filter(Boolean); n = shots[shots.length - 1]; }
+        if (n == null) return { error: 'this recording has no screenshots' };
+        const img = ctx.monitor.readShot(sel.name, sel.root, n);
+        if (!img) return { error: `screenshot ${n} not found in ${sel.id}` };
+        return { __mcpContent: [{ type: 'image', data: img.base64, mimeType: img.mime }] };
+      },
     },
     research_extract: {
-      description: "Extract vehicle records (VIN, year, make/model, trim, miles, price, location) from a session's captured network bodies. Pass session id (root:name) or omit for the most recent.",
+      description: "Extract vehicle records (VIN, year, make/model, trim, miles, price, location) from a recording's captured network bodies. Pass session id (from research_list_recordings) or omit for the most recent.",
       inputSchema: { type: 'object', properties: { session: { type: 'string' } } },
       async handler(args, ctx) {
         const ss = ctx.monitor.listSessions();
@@ -107,6 +155,10 @@ export default {
       },
     },
   },
+
+  // Focused-tab action surfaced in the extension popup: one click to record/stop the
+  // tab you're looking at. Uses the built-in 'recording' extension capability.
+  tabActions: [{ id: 'record', uses: 'recording', match: '*', labels: { off: '⏺ Record this tab', on: '⏹ Stop recording this tab' } }],
 
   ui: {
     path: '/modules/research',

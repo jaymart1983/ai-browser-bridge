@@ -117,6 +117,11 @@ async function dispatch(msg, ctx) {
         // enabled and the agent is OAuth-authorized (no browser target to gate).
         if (moduleTool) {
           const out = await moduleTool.handler(args, getModuleCtx());
+          // A module tool may return rich MCP content (e.g. an image) via __mcpContent;
+          // otherwise its return value is serialized as text.
+          if (out && typeof out === 'object' && Array.isArray(out.__mcpContent)) {
+            return rpcResult(id, { content: out.__mcpContent, ...(out.isError ? { isError: true } : {}) });
+          }
           return rpcResult(id, { content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out, null, 2) }] });
         }
 
