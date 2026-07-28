@@ -81,7 +81,7 @@ function installTrayGuard() {
   });
 }
 
-// Make the tray helper binary executable. When AI Analyst bundles the bridge, the
+// Make the tray helper binary executable. When a host app bundles the bridge, the
 // helper is embedded via go:embed and re-extracted with os.WriteFile → mode 0644
 // (embed.FS carries no exec bit), so systray2 would copy a NON-executable binary
 // and the spawn would fail. Fix the bit on BOTH the vendored traybin (what the
@@ -103,7 +103,7 @@ async function ensureBinExecutable() {
       const sysPkg = require.resolve('systray2/package.json');
       cands.push(join(dirname(sysPkg), 'traybin', bin));
     } catch { /* not resolvable → fall through */ }
-    // 2) relative to the bridge dir (cwd = layout.Bridge when spawned by AI Analyst).
+    // 2) relative to the bridge dir (cwd = layout.Bridge when spawned by a host app).
     cands.push(join(process.cwd(), 'node_modules', 'systray2', 'traybin', bin));
     // 3) relative to this module (dev / alternate cwd).
     try { cands.push(join(dirname(fileURLToPath(import.meta.url)), 'node_modules', 'systray2', 'traybin', bin)); } catch {}

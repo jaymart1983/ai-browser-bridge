@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// BRIDGE_STATE_FILE lets an embedder (AI Analyst) keep the state OUTSIDE the bridge dir so
+// BRIDGE_STATE_FILE lets an embedder keep the state OUTSIDE the bridge dir so
 // pairing keys + OAuth grants survive the bridge source being re-extracted on each update.
 const FILE = process.env.BRIDGE_STATE_FILE || join(dirname(fileURLToPath(import.meta.url)), '.bridge-state.json');
 

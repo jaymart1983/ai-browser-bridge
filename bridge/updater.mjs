@@ -5,8 +5,8 @@
 // freely on main and users only move when you deliberately cut a release. Applying
 // fast-forwards the clone to that tag and restarts. Loopback control only.
 //
-// GUARDRAILS (never clobber local/unpushed work — the AI Analyst app and manual
-// edits live in this same repo):
+// GUARDRAILS (never clobber local/unpushed work — a host app and manual
+// edits may live in this same repo):
 //   * FAST-FORWARD ONLY to the tag — never a merge.
 //   * Only when the working tree is CLEAN.
 //   * Only when HEAD is an ancestor of the tag (no local-ahead commits).

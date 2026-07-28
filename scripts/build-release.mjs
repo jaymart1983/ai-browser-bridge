@@ -33,8 +33,8 @@ rmSync(STAGE, { recursive: true, force: true });
 mkdirSync(STAGE, { recursive: true });
 
 // Ship ONLY git-tracked files. This is the safety boundary: anything gitignored
-// (secrets/state, logs, recordings, node_modules, and app-specific modules like
-// ai-analyst.mjs whose source of truth is another repo) is excluded by construction.
+// (secrets/state, logs, recordings, node_modules, and app-specific modules whose
+// source of truth is another repo) is excluded by construction.
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files'], { encoding: 'utf8' })
   .split('\n').map((s) => s.trim()).filter(Boolean);
 const EXCLUDE = new Set(['Clean Browser Bridge.command']); // dev wipe tool — never ship it

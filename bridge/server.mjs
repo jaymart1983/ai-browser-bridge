@@ -135,7 +135,7 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'browser-bridge',
-      // An embedder (AI Analyst) stamps the bundle version it shipped via BRIDGE_BUNDLE_VERSION.
+      // An embedder stamps the bundle version it shipped via BRIDGE_BUNDLE_VERSION.
       // A standalone bridge (or an older bundle that predates this field) reports null, which the
       // embedder treats as "not my bundled bridge / unknown version".
       version: process.env.BRIDGE_BUNDLE_VERSION || null,
@@ -448,7 +448,7 @@ wss.on('connection', (ws) => {
     // we derive the shared HMAC key for THAT browser and return ours.
     if (msg.type === 'pair_init' && typeof msg.pub === 'string') {
       try {
-        // Hands-free auto-pair: when the embedder (AI Analyst) sets BRIDGE_AUTOPAIR_TOKEN, the
+        // Hands-free auto-pair: when the embedder sets BRIDGE_AUTOPAIR_TOKEN, the
         // extension it launched carries that one-time token in pair_init, so it links without a
         // manual "Link" click. When the token is set we REQUIRE a match — so only the embedder's
         // extension can pair, not any loopback extension. Standalone bridges (no env) accept as before.

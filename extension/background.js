@@ -50,8 +50,8 @@ const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge /
 // Best-effort browser name for the linked-browsers list in the bridge. Specific
 // Chromium forks are matched before the generic "Chrome" fallback. NOTE: some forks
 // (Arc, Island, plain Chromium builds) don't always alter the UA and can still fall
-// through to "Chrome"/"Chromium" — the user can relabel a linked browser in AI Analyst
-// (or the bridge dashboard) to tell them apart.
+// through to "Chrome"/"Chromium" — the user can relabel a linked browser in the
+// bridge dashboard to tell them apart.
 function detectBrowserName() {
   try {
     const ua = (self.navigator && navigator.userAgent) || '';
@@ -562,7 +562,7 @@ async function submitOauthDecision(reqId, approve) {
   } catch (e) { return { ok: false, error: String(e && e.message) }; }
 }
 
-// autopair.json is written into the extension dir by an embedder (AI Analyst) that
+// autopair.json is written into the extension dir by an embedder that
 // force-loads this extension; when present, its token lets us pair HANDS-FREE (no "Link"
 // click). undefined = not yet loaded, null = none present, string = the token.
 let autopairToken;
