@@ -127,6 +127,23 @@ export default {
   baseRules: [{ id: 'research-base-v2', source: 'Any Agent', destination: DEST, permissions: ['read', 'write', 'control', 'record', 'annotate'] }],
   navLinks: [{ label: 'Deep Research', href: '/modules/research' }],
 
+  // Contributed to the MCP server's `instructions` on connect, so an agent learns this
+  // workflow without the user pasting a prompt.
+  instructions: `Annotate what the user is browsing so they don't re-evaluate the same vehicles.
+
+Loop (roughly every 10-20s while they browse):
+1. browser_tabs_list -> the active research tab. (research_list_recordings if a tab is being recorded.)
+2. See what's on screen: browser_read for page text, or research_extract for structured vehicles when the tab IS recorded (cleaner). Recording is OPTIONAL — annotating works either way.
+3. research_annotate_vehicles({tabId, vehicles:[{vin|auctionId, verdict, score?, note?}]}) for every vehicle you ALREADY have a judgment on. verdict "pass" dims + strikes the card, "maybe" is amber, "review" is green. Put your reasoning in note — it becomes the hover text.
+4. browser_annotate_list to confirm which keys matched on the page.
+5. research_user_marks({since:<newestTs>}) to collect the user's Pass/Watch/Note clicks. Record each decision in your own list, re-annotate, and pass newestTs back next poll or you'll reprocess them.
+
+Key facts:
+- ACV Auctions never renders the VIN — match by auctionId (it's in the listing links/URL). Pass both vin and auctionId when known; the mark key comes back as VIN@auctionId.
+- This bridge stores NOTHING. It only draws what you send. Keep the durable per-vehicle record yourself and persist after every decision. Annotations survive navigation, SPA routes and infinite scroll, but die when the browser closes — re-annotate from your list at the start of a session.
+- Only annotate what you actually know; no badge is better than a guessed one. If history isn't pulled, say so rather than implying a clean record.
+- ACV is read-only and low volume. Never bid.`,
+
   onEnable(ctx) {
     const existing = research(ctx).destinations && research(ctx).destinations[DEST];
     if (!existing) ctx.setDestinationContents('research', DEST, ['*']);

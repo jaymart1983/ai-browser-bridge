@@ -177,6 +177,23 @@ export function allSources() {
 }
 export function allDestinations() { return getDestinations(); }
 
+// Server-level MCP `instructions` (returned on initialize) — how an agent should use
+// this bridge. A module contributes its own section via an `instructions` string (or a
+// function returning one), so guidance ships WITH the capability instead of relying on
+// the user to paste a prompt. Only enabled modules contribute.
+export function allInstructions() {
+  const out = [];
+  for (const id of state.modulesEnabled) {
+    const mod = registry.get(id);
+    if (!mod || !mod.instructions) continue;
+    let text = '';
+    try { text = typeof mod.instructions === 'function' ? mod.instructions(_ctx) : String(mod.instructions); }
+    catch { continue; }
+    if (text && text.trim()) out.push(`## ${mod.name}\n\n${text.trim()}`);
+  }
+  return out;
+}
+
 // --- Focused-tab actions -----------------------------------------------------
 // A module declares `tabActions: [{ id, uses?, labels:{on,off}, match? }]` to have
 // the extension popup surface a per-tab action (e.g. Deep Research "Record this
