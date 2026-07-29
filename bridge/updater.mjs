@@ -152,7 +152,10 @@ export async function getZipStatus() {
       // throttled API doesn't block updating. Only a total failure becomes `error`.
       try {
         take(await githubLatestViaRedirect(rt.repo, platform));
-        warning = `${String((e && e.message) || e)} — used the non-API fallback.`;
+        // The redirect endpoint is CDN-cached, so it can lag the API by a few minutes.
+        // It only ever UNDER-reports (you may not see a brand-new release yet), never
+        // points at something newer than exists, so the failure mode is safe.
+        warning = `${String((e && e.message) || e)} — used the non-API fallback, which can lag a few minutes behind a brand-new release.`;
       } catch (e2) {
         error = String((e && e.message) || e);
       }
