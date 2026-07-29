@@ -316,10 +316,13 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     const reqId = form.reqId || jb.reqId;
     const approve = String(form.approve ?? jb.approve) === '1' || form.approve === true || jb.approve === true;
     const mac = form.mac || jb.mac;
-    if (!verifyDecision(reqId, approve, mac)) { json(res, 403, { error: 'approval must be signed by the paired browser (approve in the extension popup)' }); return true; }
+    const verified = verifyDecision(reqId, approve, mac);
+    console.log('[oauth] DECISION reqId=', reqId, 'approve=', approve, 'verified=', verified, 'pendingKnown=', pending.has(reqId));
+    if (!verified) { json(res, 403, { error: 'approval must be signed by the paired browser (approve in the extension popup)' }); return true; }
     const p = pending.get(reqId);
     const r = decide(reqId, approve);
-    if (!r.ok) { json(res, 400, { error: r.error }); return true; }
+    if (!r.ok) { console.log('[oauth] DECISION rejected:', r.error, '(reqId churned/expired?)'); json(res, 400, { error: r.error }); return true; }
+    console.log('[oauth] DECISION ok; code created, redirect=', finalRedirect(p));
     // Record the grant. The authorization code reaches the client via the consent
     // tab redirecting to the client's callback (standard OAuth) — see /oauth/status.
     // We deliberately do NOT hit that callback server-side: a local MCP client's
@@ -338,7 +341,7 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
   if (req.method === 'GET' && path === '/oauth/status') {
     const p = pending.get(url.searchParams.get('reqId'));
     if (!p) { json(res, 404, { error: 'unknown' }); return true; }
-    if (p.decided && p.approved) json(res, 200, { redirect: finalRedirect(p) });
+    if (p.decided && p.approved) { console.log('[oauth] STATUS → consent tab redirecting to', finalRedirect(p)); json(res, 200, { redirect: finalRedirect(p) }); }
     else if (p.decided) json(res, 200, { denied: true });
     else json(res, 200, { pending: true });
     return true;
@@ -348,6 +351,7 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
   if (req.method === 'POST' && path === '/oauth/token') {
     const { form } = await readBody(req);
     const gt = form.grant_type;
+    console.log('[oauth] TOKEN request grant_type=', gt, 'code?', !!form.code, 'verifier?', !!form.code_verifier);
     if (gt === 'authorization_code') {
       const rec = codes.get(form.code);
       if (!rec || rec.exp < now()) { console.log('[oauth] token: bad/expired code (present?', !!rec, ')'); json(res, 400, { error: 'invalid_grant' }); return true; }

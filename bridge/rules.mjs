@@ -11,11 +11,17 @@
 import { state } from './state.mjs';
 
 // Fixed permission verbs → the core browser tools they cover.
+// `annotate` = draw the bridge's own visual overlay on a tab (badges/dim/strike).
+// Deliberately its own verb so a user can let an agent mark up what they're looking
+// at WITHOUT granting `control` (which includes browser_eval and can do anything).
+// The annotate tools never return page-derived content — see mcp.mjs — so this verb
+// cannot become a content-read path.
 export const VERB_TOOLS = {
   read: ['browser_tabs_list', 'browser_read', 'browser_screenshot'],
   write: ['browser_navigate'],
   control: ['browser_new_tab', 'browser_close_tab', 'browser_activate_tab', 'browser_eval'],
   record: ['browser_monitor_start', 'browser_monitor_stop', 'browser_monitor_list'],
+  annotate: ['browser_annotate', 'browser_annotate_clear', 'browser_annotate_list'],
 };
 export const PERMISSIONS = Object.keys(VERB_TOOLS);
 const TOOL_VERB = {};

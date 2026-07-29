@@ -36,11 +36,20 @@ export async function loadModules() {
       } catch (e) { console.error('[modules] failed to load', f, e && e.message); }
     }
   }
-  // Re-apply persisted enabled state (register destinations for enabled modules).
+  // Re-apply persisted enabled state (register destinations for enabled modules) and
+  // seed any base rule the module has ADDED since it was enabled. Without this, a
+  // module update that introduces a new rule (e.g. to grant a newly-added permission
+  // verb) would never take effect on an existing install, because baseRules used to be
+  // seeded only on the disabled→enabled transition. Only rules whose id is absent are
+  // added, so a rule the user edited or deleted is never resurrected or overwritten.
+  let rulesAdded = 0;
   for (const id of state.modulesEnabled) {
     const mod = registry.get(id);
-    if (mod) registerDestinations(mod);
+    if (!mod) continue;
+    registerDestinations(mod);
+    rulesAdded += seedBaseRules(mod);
   }
+  if (rulesAdded) { console.log(`[modules] seeded ${rulesAdded} new base rule(s) from module updates`); save(); }
   // One-time auto-enable: a module declares `autoEnable: true` in its own manifest to
   // go live on first install without a manual toggle. Purely module-driven — the bridge
   // holds no module names. Gated on `modulesSeen` so it fires ONCE per module: if the
@@ -98,6 +107,19 @@ function registerDestinations(mod) {
   }
 }
 
+// Add any of the module's baseRules that aren't in state yet. Additive only — an
+// existing rule id is left exactly as the user has it. Returns how many were added.
+function seedBaseRules(mod) {
+  let added = 0;
+  for (const r of mod.baseRules || []) {
+    if (!state.rules.find((x) => x.id === r.id)) {
+      state.rules.push({ ...r, moduleId: mod.id, enabled: r.enabled !== false });
+      added++;
+    }
+  }
+  return added;
+}
+
 export function setEnabled(id, enabled) {
   const mod = registry.get(id);
   if (!mod) return { ok: false, error: 'no such module' };
@@ -105,11 +127,7 @@ export function setEnabled(id, enabled) {
   if (enabled && !cur) {
     state.modulesEnabled.push(id);
     registerDestinations(mod);
-    for (const r of mod.baseRules || []) {
-      if (!state.rules.find((x) => x.id === r.id)) {
-        state.rules.push({ ...r, moduleId: mod.id, enabled: r.enabled !== false });
-      }
-    }
+    seedBaseRules(mod);
     if (mod.onEnable && _ctx) { try { mod.onEnable(_ctx); } catch (e) { console.error('[modules] onEnable', e && e.message); } }
   } else if (!enabled && cur) {
     state.modulesEnabled = state.modulesEnabled.filter((x) => x !== id);

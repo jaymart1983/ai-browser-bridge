@@ -100,6 +100,9 @@ const CAPABILITIES = [
   'monitor.start',
   'monitor.stop',
   'monitor.list',
+  'overlay.set',
+  'overlay.clear',
+  'overlay.list',
 ];
 
 // ---------------------------------------------------------------------------
@@ -423,6 +426,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  // Overlay scan report: which of OUR annotation keys matched / are on screen. Only
+  // our own keys, never page content. Throttled — infinite scroll fires often.
+  if (msg.type === 'OVERLAY_SEEN') {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (typeof tabId === 'number') {
+      const now = Date.now();
+      if (now - (overlaySeenAt.get(tabId) || 0) > 1000) {
+        overlaySeenAt.set(tabId, now);
+        sessGet(OVERLAY_SEEN_KEY).then((s) => {
+          s[String(tabId)] = {
+            matched: Array.isArray(msg.matched) ? msg.matched.slice(0, 500) : [],
+            visible: Array.isArray(msg.visible) ? msg.visible.slice(0, 500) : [],
+            ts: now,
+          };
+          return sessSet(OVERLAY_SEEN_KEY, s);
+        }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  // The user marked an annotated item in-page (Pass / Watch / Note). We do NOT store
+  // it — it goes into the tab's active recording as an `annotation` event so the
+  // agent picks it up and persists it wherever it keeps its list.
+  if (msg.type === 'OVERLAY_ACTION') {
+    const tabId = sender && sender.tab && sender.tab.id;
+    const recorded = typeof tabId === 'number' && monitored.has(tabId);
+    if (recorded) {
+      emitMonitor(tabId, {
+        kind: 'annotation',
+        key: String(msg.key || '').slice(0, 120),
+        action: String(msg.action || '').slice(0, 24),
+        reason: String(msg.reason || '').slice(0, 400),
+        url: (sender.tab && sender.tab.url) || '',
+      });
+    }
+    sendResponse({ ok: true, recorded });
+    return; // sync response
+  }
+
   // Popup <-> SW control messages.
   if (msg.type === 'POPUP') {
     handlePopup(msg)
@@ -505,6 +548,18 @@ async function handleCommand(cmd) {
       case 'monitor.list':
         await requireAuth(cmd);
         return { id, result: monitorList() };
+
+      case 'overlay.set':
+        await requireAuth(cmd);
+        return { id, result: await overlaySet(params) };
+
+      case 'overlay.clear':
+        await requireAuth(cmd);
+        return { id, result: await overlayClear(params) };
+
+      case 'overlay.list':
+        await requireAuth(cmd);
+        return { id, result: await overlayList(params) };
 
       default:
         return { id, error: { code: 'UNKNOWN_METHOD', message: `Unknown method: ${method}` } };
@@ -1058,6 +1113,333 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => { monitorStop(tabId).catch(() => {}); });
+
+// ---------------------------------------------------------------------------
+// Overlay mode — draw the bridge's OWN annotations on top of a tab the user is
+// browsing: a badge beside each match, hover detail, and optional dim/strike of
+// the enclosing card. This is a GENERIC capability — the bridge sends match rules
+// (text / href / urlPattern / selector) and we render them. No domain knowledge
+// (VINs, listings, …) lives here; that belongs to whichever module built the rules.
+//
+// State is EPHEMERAL BY DESIGN and lives in chrome.storage.session: it survives
+// MV3 service-worker suspension and dies when the browser closes. Annotations are
+// render state, never a notes database — the agent owns the durable list.
+// ---------------------------------------------------------------------------
+
+const OVERLAY_KEY = 'overlayRules'; // session: { [tabId]: rules[] }
+const OVERLAY_SEEN_KEY = 'overlaySeen'; // session: { [tabId]: { matched[], visible[], ts } }
+const overlaySeenAt = new Map(); // tabId -> last write ms (throttle scan reports)
+
+async function sessGet(key) {
+  try { const o = await chrome.storage.session.get(key); return (o && o[key]) || {}; } catch { return {}; }
+}
+async function sessSet(key, val) { try { await chrome.storage.session.set({ [key]: val }); } catch { /* best effort */ } }
+
+async function overlayRulesFor(tabId) { return (await sessGet(OVERLAY_KEY))[String(tabId)] || []; }
+async function overlayStore(tabId, rules) {
+  const all = await sessGet(OVERLAY_KEY);
+  if (rules && rules.length) all[String(tabId)] = rules; else delete all[String(tabId)];
+  await sessSet(OVERLAY_KEY, all);
+}
+
+// Push the current rule set into the page. Re-running the injected function is how
+// updates are delivered (there is no SW→page channel); it installs once and then
+// just re-renders, so this is safe to call repeatedly.
+async function overlayPush(tabId, rules) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: __aibridgeOverlay, args: [rules || []] });
+    return true;
+  } catch (e) { return false; } // chrome://, PDF viewer, etc.
+}
+
+// The overlay engine, injected into the ISOLATED world. Must be self-contained
+// (no closure over extension scope) and idempotent — executeScript re-runs it on
+// every update and on every navigation.
+function __aibridgeOverlay(rules) {
+  const MARK = 'data-aibridge-ann';
+  const DIM = '__aibridge-dim', STRIKE = '__aibridge-strike', HIDE = '__aibridge-hide';
+  const S = window.__aibridgeOverlayState || (window.__aibridgeOverlayState = { rules: [], timer: null });
+  S.rules = Array.isArray(rules) ? rules : [];
+
+  const cut = (v, n) => String(v == null ? '' : v).slice(0, n);
+  // Only allow simple CSS color tokens — this value lands in a stylesheet.
+  const safeColor = (c) => (/^(#[0-9a-f]{3,8}|rgba?\([\d.,%\s]+\)|[a-z]{3,20})$/i.test(String(c || '')) ? String(c) : '#3b82f6');
+
+  function ensureStyle() {
+    if (document.getElementById('__aibridge-ann-style')) return;
+    const st = document.createElement('style');
+    st.id = '__aibridge-ann-style';
+    st.textContent =
+      '.' + DIM + '{opacity:.4 !important;filter:grayscale(.8) !important}' +
+      '.' + STRIKE + '{text-decoration:line-through !important;text-decoration-color:#f85149 !important;text-decoration-thickness:2px !important}' +
+      '.' + HIDE + '{display:none !important}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function clearAll() {
+    document.querySelectorAll('[' + MARK + ']').forEach((n) => n.remove());
+    [DIM, STRIKE, HIDE].forEach((c) => document.querySelectorAll('.' + c).forEach((n) => n.classList.remove(c)));
+  }
+
+  // Badge lives in a CLOSED shadow root inside an `all:initial` host, so page CSS
+  // cannot restyle it and our CSS cannot leak out. Text only — never innerHTML
+  // with rule-supplied strings, and never a rule-supplied link target.
+  function makeBadge(rule) {
+    const host = document.createElement('span');
+    host.setAttribute(MARK, cut(rule.key, 120) || '1');
+    host.style.cssText = 'all:initial;display:inline-block;vertical-align:middle;margin:0 4px';
+    const sh = host.attachShadow({ mode: 'closed' });
+    const color = safeColor(rule.badge && rule.badge.color);
+    const st = document.createElement('style');
+    st.textContent =
+      ':host{all:initial}*{box-sizing:border-box;font-family:-apple-system,system-ui,"Segoe UI",sans-serif}' +
+      '.b{display:inline-flex;align-items:center;gap:4px;background:' + color + ';color:#fff;font-size:11px;font-weight:600;' +
+      'line-height:1.45;padding:2px 7px;border-radius:5px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.35);white-space:nowrap;position:relative}' +
+      '.m{opacity:.65;font-size:9px}' +
+      '.p{position:absolute;z-index:2147483647;left:0;top:calc(100% + 5px);min-width:210px;max-width:340px;background:#14161b;color:#e6e8ec;' +
+      'border:1px solid #2a2f3a;border-radius:8px;padding:9px 10px;box-shadow:0 8px 26px rgba(0,0,0,.5);display:none;cursor:default;text-align:left}' +
+      '.b:hover .tip,.p.open{display:block}' +
+      '.h{font-size:9px;text-transform:uppercase;letter-spacing:.5px;opacity:.5;margin-bottom:5px;font-weight:700}' +
+      '.tx{font-size:11px;font-weight:400;line-height:1.5;white-space:pre-wrap;word-break:break-word}' +
+      '.row{display:flex;gap:5px;margin-top:9px}' +
+      'button{flex:1;font-size:10px;font-weight:600;padding:4px 0;border-radius:5px;border:1px solid #2a2f3a;background:#1c2027;color:#e6e8ec;cursor:pointer}' +
+      'button:hover{border-color:#3b82f6}' +
+      'input{width:100%;margin-top:7px;font-size:11px;padding:4px 6px;border-radius:5px;border:1px solid #2a2f3a;background:#0f1115;color:#e6e8ec}';
+    const b = document.createElement('span'); b.className = 'b';
+    const mk = document.createElement('span'); mk.className = 'm'; mk.textContent = '◆'; // Browser Bridge marker
+    const lb = document.createElement('span'); lb.textContent = cut((rule.badge && rule.badge.label) || 'note', 56);
+    b.append(mk, lb);
+
+    // Hover detail
+    const tip = document.createElement('span'); tip.className = 'p tip';
+    const th = document.createElement('span'); th.className = 'h'; th.textContent = 'Browser Bridge · note';
+    const tt = document.createElement('span'); tt.className = 'tx';
+    tt.textContent = cut((rule.badge && rule.badge.tooltip) || (rule.badge && rule.badge.label) || '', 900);
+    tip.append(th, tt);
+
+    // Click → mark menu (reported back to the bridge, which files it into the
+    // active recording so the agent can pick it up).
+    const pan = document.createElement('span'); pan.className = 'p';
+    const ph = document.createElement('span'); ph.className = 'h'; ph.textContent = 'Mark ' + (cut(rule.key, 24) || 'this');
+    const inp = document.createElement('input'); inp.placeholder = 'reason (optional)';
+    const row = document.createElement('span'); row.className = 'row';
+    const note = document.createElement('span'); note.className = 'tx'; note.style.cssText = 'display:block;margin-top:7px;opacity:.6';
+    for (const act of ['pass', 'watch', 'note']) {
+      const btn = document.createElement('button');
+      btn.textContent = act;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        try {
+          chrome.runtime.sendMessage({ type: 'OVERLAY_ACTION', key: cut(rule.key, 120), action: act, reason: cut(inp.value, 400) })
+            .then((r) => { note.textContent = r && r.recorded ? 'Saved to the recording ✓' : 'Not recording this tab — start recording to save marks.'; })
+            .catch(() => { note.textContent = 'Could not reach the bridge.'; });
+        } catch (e2) { note.textContent = 'Could not reach the bridge.'; }
+      });
+      row.appendChild(btn);
+    }
+    pan.append(ph, inp, row, note);
+
+    b.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      pan.classList.toggle('open');
+    });
+    b.append(tip, pan);
+    sh.append(st, b);
+    return host;
+  }
+
+  function globRe(p) {
+    return new RegExp('^' + String(p).replace(/[.*+?^${}()|[\]\\]/g, (m) => (m === '*' ? '.*' : '\\' + m)) + '$', 'i');
+  }
+
+  // Nearest ancestor that looks like a listing card, for dim/strike.
+  function cardOf(el, sel) {
+    if (sel) { try { const c = el.closest(sel); if (c) return c; } catch (e) {} }
+    let n = el;
+    for (let i = 0; i < 12 && n && n.parentElement && n.parentElement !== document.body; i++) {
+      n = n.parentElement;
+      const h = n.offsetHeight || 0;
+      if (h >= 70 && h <= 1500 && n.querySelector('a[href]')) return n;
+    }
+    return null;
+  }
+
+  function textTargets(needle) {
+    const out = [];
+    if (!needle || !document.body) return out;
+    const want = String(needle).toUpperCase();
+    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        const v = n.nodeValue;
+        if (!v || v.length > 5000 || v.toUpperCase().indexOf(want) < 0) return NodeFilter.FILTER_REJECT;
+        const p = n.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        if (/^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA|TITLE)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let n;
+    while ((n = w.nextNode()) && out.length < 25) if (out.indexOf(n.parentElement) < 0) out.push(n.parentElement);
+    return out;
+  }
+
+  function render() {
+    if (!document.body) return;
+    ensureStyle();
+    clearAll();
+    for (const r of S.rules) {
+      if (!r || !r.match) continue;
+      let targets = [], after = false;
+      try {
+        if (r.match.text) targets = textTargets(r.match.text);
+        else if (r.match.href) {
+          const v = String(r.match.href);
+          targets = Array.prototype.slice.call(document.querySelectorAll('a[href]'))
+            .filter((a) => (a.getAttribute('href') || '').indexOf(v) >= 0).slice(0, 25);
+          after = true; // never nest the badge inside the link
+        } else if (r.match.selector) {
+          targets = Array.prototype.slice.call(document.querySelectorAll(r.match.selector)).slice(0, 25);
+        } else if (r.match.urlPattern) {
+          if (globRe(r.match.urlPattern).test(location.href)) {
+            // Whole page is this item → fixed banner, top-right.
+            const badge = makeBadge(r);
+            badge.style.cssText = 'all:initial;display:block;position:fixed;top:12px;right:12px;z-index:2147483647';
+            document.body.appendChild(badge);
+            const c = r.cardSelector ? document.querySelector(r.cardSelector) : null;
+            if (c && r.card) {
+              if (r.card.dim) c.classList.add(DIM);
+              if (r.card.strike) c.classList.add(STRIKE);
+              if (r.card.hide) c.classList.add(HIDE);
+            }
+          }
+          continue;
+        }
+      } catch (e) { continue; }
+
+      for (const el of targets) {
+        if (!el || !el.isConnected || el.closest('[' + MARK + ']')) continue;
+        try {
+          const badge = makeBadge(r);
+          if (after) el.insertAdjacentElement('afterend', badge); else el.appendChild(badge);
+          if (r.card) {
+            const c = cardOf(el, r.cardSelector);
+            if (c) {
+              if (r.card.dim) c.classList.add(DIM);
+              if (r.card.strike) c.classList.add(STRIKE);
+              if (r.card.hide) c.classList.add(HIDE);
+            }
+          }
+        } catch (e) { /* skip this target */ }
+      }
+    }
+    report();
+  }
+
+  // Tell the SW which keys matched and which are on screen (our own rules only —
+  // never page content, so this stays inside the `annotate` permission).
+  function report() {
+    const matched = [], visible = [];
+    document.querySelectorAll('[' + MARK + ']').forEach((n) => {
+      const k = n.getAttribute(MARK);
+      if (!k || k === '1') return;
+      if (matched.indexOf(k) < 0) matched.push(k);
+      const r = n.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth && visible.indexOf(k) < 0) visible.push(k);
+    });
+    try { chrome.runtime.sendMessage({ type: 'OVERLAY_SEEN', matched, visible }).catch(() => {}); } catch (e) {}
+  }
+
+  const schedule = () => { clearTimeout(S.timer); S.timer = setTimeout(render, 160); };
+
+  if (!window.__aibridgeOverlayInstalled) {
+    window.__aibridgeOverlayInstalled = true;
+    // Re-apply on DOM churn (infinite scroll, lazy lists) and on SPA route changes —
+    // there is no webNavigation permission and tabs.onUpdated does not re-inject on
+    // History API URL changes, so the page has to notice for itself.
+    try {
+      new MutationObserver(() => { if (S.rules.length) schedule(); })
+        .observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+    for (const m of ['pushState', 'replaceState']) {
+      try {
+        const o = history[m];
+        history[m] = function () { const r = o.apply(this, arguments); schedule(); return r; };
+      } catch (e) {}
+    }
+    addEventListener('popstate', schedule);
+    addEventListener('scroll', () => { clearTimeout(S.rtimer); S.rtimer = setTimeout(report, 300); }, true);
+  }
+
+  render();
+  return { ok: true, rules: S.rules.length };
+}
+
+async function overlaySet(params) {
+  const tabId = params && params.tabId;
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  const incoming = Array.isArray(params.rules) ? params.rules : [];
+  if (incoming.length > 500) throw new CmdError('BAD_REQUEST', 'Too many rules (max 500).');
+  for (const r of incoming) {
+    if (!r || typeof r.key !== 'string' || !r.key) throw new CmdError('BAD_REQUEST', 'every rule needs a string `key`.');
+    const m = r.match;
+    if (!m || typeof m !== 'object' || !(m.text || m.href || m.selector || m.urlPattern)) {
+      throw new CmdError('BAD_REQUEST', `rule "${r.key}": match must set one of text | href | selector | urlPattern.`);
+    }
+  }
+  const merge = params.merge !== false; // default: merge by key
+  let rules = incoming;
+  if (merge) {
+    const prev = await overlayRulesFor(tabId);
+    const byKey = new Map(prev.map((r) => [r.key, r]));
+    for (const r of incoming) byKey.set(r.key, r);
+    rules = Array.from(byKey.values()).slice(-500);
+  }
+  const applied = await overlayPush(tabId, rules);
+  if (!applied) throw new CmdError('FORBIDDEN', 'Cannot annotate this tab (not an injectable page).');
+  await overlayStore(tabId, rules);
+  return { tabId, rules: rules.length, annotated: true };
+}
+
+async function overlayClear(params) {
+  const tabId = params && params.tabId;
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  let rules = [];
+  if (Array.isArray(params.keys) && params.keys.length) {
+    const drop = new Set(params.keys.map(String));
+    rules = (await overlayRulesFor(tabId)).filter((r) => !drop.has(r.key));
+  }
+  await overlayPush(tabId, rules);
+  await overlayStore(tabId, rules);
+  const seen = await sessGet(OVERLAY_SEEN_KEY);
+  if (!rules.length) { delete seen[String(tabId)]; await sessSet(OVERLAY_SEEN_KEY, seen); }
+  return { tabId, rules: rules.length, cleared: true };
+}
+
+async function overlayList(params) {
+  const tabId = params && params.tabId;
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  const rules = await overlayRulesFor(tabId);
+  const seen = (await sessGet(OVERLAY_SEEN_KEY))[String(tabId)] || { matched: [], visible: [] };
+  return {
+    tabId,
+    keys: rules.map((r) => r.key),
+    matchedOnPage: seen.matched || [],
+    visibleOnScreen: seen.visible || [],
+    reportedAt: seen.ts || null,
+  };
+}
+
+// Re-apply annotations after a full load wipes injected scripts. Separate listener
+// from the monitor's so the two features stay independent.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status !== 'complete') return;
+  overlayRulesFor(tabId).then((rules) => { if (rules.length) overlayPush(tabId, rules); }).catch(() => {});
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  overlayStore(tabId, []).catch(() => {});
+  overlaySeenAt.delete(tabId);
+  sessGet(OVERLAY_SEEN_KEY).then((s) => { if (s[String(tabId)]) { delete s[String(tabId)]; return sessSet(OVERLAY_SEEN_KEY, s); } }).catch(() => {});
+});
 
 // Only allow http(s) navigation targets; block file:, chrome:, javascript:, etc.
 function assertHttpLikeUrl(url) {

@@ -14,6 +14,15 @@ const PRESETS = [
   { label: 'Redfin', pattern: '*.redfin.com' },
 ];
 
+// Verdict vocabulary + colors, kept identical to the toolkit's own reports
+// (src/report-jeep.ts) so an overlay badge reads the same as the tracker.
+// `mute` = dim + strike the card, so the user visually skips it.
+const VERDICT = {
+  review: { label: '✅ REVIEW', color: '#3fb950', mute: false },
+  maybe: { label: '🟡 MAYBE', color: '#d29922', mute: false },
+  pass: { label: '🔴 PASS', color: '#f85149', mute: true },
+};
+
 const research = (ctx) => (ctx.state.artifacts.research = ctx.state.artifacts.research || {});
 function contentsOf(ctx) {
   const a = research(ctx).destinations && research(ctx).destinations[DEST];
@@ -103,7 +112,11 @@ export default {
   description: 'Let any authorized agent read/navigate/control and record a chosen set of research tabs, and query what was captured.',
   autoEnable: true, // go live on first install without a manual toggle (one-time; a later manual disable sticks)
   artifacts: { sources: [], destinations: [{ id: DEST, name: 'Research Enabled Tabs', kind: 'dynamic', patterns: [] }] },
-  baseRules: [{ id: 'research-base', source: 'Any Agent', destination: DEST, permissions: ['read', 'write', 'control', 'record'] }],
+  // Rule id is versioned: setEnabled only adds rules whose id isn't already present,
+  // so bumping it is how an existing install picks up a NEW permission verb. The old
+  // `research-base` rule can stay — evaluate() skips rules that don't list the verb
+  // being checked, so `annotate` falls through to this one.
+  baseRules: [{ id: 'research-base-v2', source: 'Any Agent', destination: DEST, permissions: ['read', 'write', 'control', 'record', 'annotate'] }],
   navLinks: [{ label: 'Deep Research', href: '/modules/research' }],
 
   onEnable(ctx) {
@@ -143,6 +156,82 @@ export default {
         return { __mcpContent: [{ type: 'image', data: img.base64, mimeType: img.mime }] };
       },
     },
+    research_annotate_vehicles: {
+      description: [
+        'Mark up vehicles ON THE PAGE THE USER IS BROWSING with what you already know — a badge per vehicle, your reasoning on hover, and passed ones dimmed + struck through so the user stops clicking them.',
+        '',
+        'YOU supply the list; this module stores nothing. Typical loop: read the recording (research_read_recording / research_extract) to see which vehicles the user is looking at, compare against your own table, then call this with a row per vehicle you recognize.',
+        '',
+        'Identify each vehicle by `vin` (matched against the page text) OR by `auctionId` for ACV Auctions, which never renders the VIN — the auction id is matched against listing links instead. Pass both if you have them.',
+        '',
+        'verdict controls the styling: "pass" = red, dimmed + struck; "maybe" = amber; "review" = green. Put your reasoning in `note` — it becomes the hover text.',
+        '',
+        'Example: [{"vin":"1C4BJWFG7FL620087","verdict":"pass","score":42,"note":"Canadian import · rust risk\\nPriced 14% above comps"}]',
+        '',
+        'Annotations persist across navigation and infinite scroll until the browser closes. The tab must be in Research Enabled Tabs.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'tab to annotate (from browser_tabs_list)' },
+          vehicles: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                vin: { type: 'string', description: '17-char VIN; matched against page text' },
+                auctionId: { type: 'string', description: 'ACV auction id; matched against links (use when the VIN is not on screen)' },
+                verdict: { type: 'string', enum: ['pass', 'maybe', 'review'], description: 'drives color + dim/strike' },
+                score: { type: 'number', description: 'optional, shown on the badge' },
+                note: { type: 'string', description: 'your reasoning — shown on hover' },
+                label: { type: 'string', description: 'optional badge text override' },
+              },
+            },
+          },
+          merge: { type: 'boolean', description: 'keep existing annotations on the tab (default true)' },
+        },
+        required: ['tabId', 'vehicles'],
+      },
+      async handler(args, ctx) {
+        const tabId = Number(args.tabId);
+        if (!Number.isFinite(tabId)) return { error: 'tabId (number) is required' };
+        // Module tools are NOT gated by the rule engine (see mcp.mjs), so gate here
+        // with the same predicate the rest of this module uses.
+        let url = '';
+        try { url = (await ctx.resolveTabUrl(tabId)) || ''; } catch { /* fall through */ }
+        if (!/^https?:/i.test(url)) return { error: `tab ${tabId} is not an http(s) tab` };
+        let origin = ''; try { origin = new URL(url).origin; } catch {}
+        if (!allowed(ctx, origin)) {
+          return { error: `${origin} is not in Research Enabled Tabs — enable it at /modules/research (Config tab) first.` };
+        }
+        const list = Array.isArray(args.vehicles) ? args.vehicles : [];
+        if (!list.length) return { error: 'vehicles[] is empty — nothing to annotate' };
+
+        const rules = [];
+        for (const v of list) {
+          const vin = typeof v.vin === 'string' ? v.vin.trim().toUpperCase() : '';
+          const aid = v.auctionId != null ? String(v.auctionId).trim() : '';
+          if (!vin && !aid) continue;
+          const verdict = VERDICT[v.verdict] || VERDICT.maybe;
+          const score = Number.isFinite(v.score) ? ' · ' + v.score : '';
+          const label = typeof v.label === 'string' && v.label ? v.label : verdict.label + score;
+          const badge = { label, color: verdict.color, tooltip: v.note || label };
+          const card = verdict.mute ? { dim: true, strike: true } : undefined;
+          // VIN is matched in the page text; ACV auction ids live in listing hrefs.
+          if (vin) rules.push({ key: vin, match: { text: vin }, badge, card });
+          if (aid) rules.push({ key: vin ? vin + '@' + aid : aid, match: { href: '/' + aid }, badge, card });
+        }
+        if (!rules.length) return { error: 'no vehicle had a vin or auctionId' };
+
+        try {
+          const r = await ctx.relayCommand('overlay.set', { tabId, rules, merge: args.merge !== false });
+          return {
+            annotated: rules.length, tab: url, rules: r && r.rules,
+            hint: 'Call browser_annotate_list to see which matched on screen, or browser_screenshot to look at it.',
+          };
+        } catch (e) { return { error: String((e && e.message) || e) }; }
+      },
+    },
     research_extract: {
       description: "Extract vehicle records (VIN, year, make/model, trim, miles, price, location) from a recording's captured network bodies. Pass session id (from research_list_recordings) or omit for the most recent.",
       inputSchema: { type: 'object', properties: { session: { type: 'string' } } },
@@ -156,9 +245,33 @@ export default {
     },
   },
 
-  // Focused-tab action surfaced in the extension popup: one click to record/stop the
-  // tab you're looking at. Uses the built-in 'recording' extension capability.
-  tabActions: [{ id: 'record', uses: 'recording', match: '*', labels: { off: '⏺ Record this tab', on: '⏹ Stop recording this tab' } }],
+  // Focused-tab actions surfaced in the extension popup. `record` uses the built-in
+  // 'recording' capability; `annotations` is handled by onTabAction below so the user
+  // can hide/show the agent's notes on the tab they're looking at.
+  tabActions: [
+    { id: 'record', uses: 'recording', match: '*', labels: { off: '⏺ Record this tab', on: '⏹ Stop recording this tab' } },
+    { id: 'annotations', match: '*', labels: { off: '🏷 Show agent notes', on: '🏷 Hide agent notes' } },
+  ],
+
+  // On = the tab currently has annotations drawn on it.
+  async tabActionState(id, { tabId }, ctx) {
+    if (id !== 'annotations') return false;
+    try { const r = await ctx.relayCommand('overlay.list', { tabId: Number(tabId) }); return !!(r && r.keys && r.keys.length); }
+    catch { return false; }
+  },
+
+  // Toggling only CLEARS (hides) — re-drawing is the agent's job, since the bridge
+  // stores no notes of its own. Stashing the cleared set would make this a store.
+  async onTabAction(id, { tabId }, ctx) {
+    if (id !== 'annotations') return { ok: false, error: 'unknown action' };
+    const tid = Number(tabId);
+    const cur = await ctx.relayCommand('overlay.list', { tabId: tid }).catch(() => null);
+    if (cur && cur.keys && cur.keys.length) {
+      await ctx.relayCommand('overlay.clear', { tabId: tid });
+      return { ok: true, on: false, note: 'Notes hidden. Ask the agent to annotate again to bring them back.' };
+    }
+    return { ok: true, on: false, note: 'No agent notes on this tab yet — ask the agent to annotate it.' };
+  },
 
   ui: {
     path: '/modules/research',
