@@ -181,6 +181,12 @@ export default {
       async handler(args, ctx) {
         const since = Number(args.since) || 0;
         const out = [];
+        // Live marks from the bridge's delivery queue — present whether or not the tab
+        // is being recorded. This is the primary source.
+        if (ctx.overlay && typeof ctx.overlay.marks === 'function') {
+          for (const m of ctx.overlay.marks(since)) out.push({ ...m, session: null });
+        }
+        // Plus any marks already written into recordings (survive a bridge restart).
         for (const s of ctx.monitor.listSessions()) {
           let ev = [];
           try { ev = ctx.monitor.readEvents(s.name, s.root, 0).events; } catch { continue; }
@@ -190,6 +196,15 @@ export default {
             out.push({ ts: e.ts, key: e.key, action: e.action, reason: e.reason || '', url: e.url || '', tabId: s.tabId, session: s.id });
           }
         }
+        // De-dupe: a mark on a recorded tab arrives from both sources.
+        const seen = new Set();
+        const uniq = [];
+        for (const m of out) {
+          const k = m.ts + '|' + m.key + '|' + m.action;
+          if (seen.has(k)) continue;
+          seen.add(k); uniq.push(m);
+        }
+        out.length = 0; out.push(...uniq);
         out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
         return {
           marks: out.slice(0, 200),

@@ -494,6 +494,13 @@ wss.on('connection', (ws) => {
       writeMonitorEvent(msg);
       return;
     }
+    // The user acted on an overlay annotation (Pass / Watch / Note). Buffered for the
+    // agent to collect — recording NOT required. This is a transient delivery queue,
+    // not storage: in memory only, capped, and gone on restart. Nothing is persisted.
+    if (msg.type === 'overlay_mark') {
+      pushOverlayMark(msg);
+      return;
+    }
     // Agent control frames (hello, etc.) have no id we track.
     if (msg.id == null) return;
     const entry = pending.get(String(msg.id));
@@ -711,6 +718,30 @@ function readEvents(key, root, since) {
   return { events, total: lines.length };
 }
 
+// --- Overlay marks: transient delivery queue -------------------------------
+// When the user clicks Pass/Watch/Note on an annotation badge, the mark lands here
+// so an agent can collect it via a module tool. Deliberately IN MEMORY and capped —
+// the bridge is a transport for the user's decision, not a store for it. The agent
+// is responsible for persisting decisions wherever it keeps its own list.
+const OVERLAY_MARK_MAX = 500;
+const overlayMarks = [];
+function pushOverlayMark(msg) {
+  overlayMarks.push({
+    ts: Number(msg.ts) || Date.now(),
+    tabId: msg.tabId,
+    key: String(msg.key || '').slice(0, 120),
+    action: String(msg.action || '').slice(0, 24),
+    reason: String(msg.reason || '').slice(0, 400),
+    url: String(msg.url || '').slice(0, 2000),
+  });
+  if (overlayMarks.length > OVERLAY_MARK_MAX) overlayMarks.splice(0, overlayMarks.length - OVERLAY_MARK_MAX);
+}
+// Marks newer than `since` (epoch ms), newest first.
+function listOverlayMarks(since = 0) {
+  const s = Number(since) || 0;
+  return overlayMarks.filter((m) => m.ts > s).sort((a, b) => b.ts - a.ts);
+}
+
 // Read one screenshot as base64 (for the MCP recording-review tools → image content).
 function readShot(key, root, n) {
   const file = String(n).replace(/[^0-9]/g, '');
@@ -793,6 +824,8 @@ const moduleCtx = {
   relayCommand, state, save, resolveTabUrl,
   setDestinationContents, refreshModuleDestinations,
   monitor: { listSessions, readEvents, readShot, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS },
+  // Overlay capability: the user's in-page marks, awaiting collection by an agent.
+  overlay: { marks: listOverlayMarks },
 };
 configureModules(moduleCtx);
 await loadModules();

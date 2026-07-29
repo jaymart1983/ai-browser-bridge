@@ -448,21 +448,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // The user marked an annotated item in-page (Pass / Watch / Note). We do NOT store
-  // it — it goes into the tab's active recording as an `annotation` event so the
-  // agent picks it up and persists it wherever it keeps its list.
+  // it. It is always sent straight to the bridge as an `overlay_mark` frame, so this
+  // works WITHOUT the tab being recorded; when the tab IS being recorded we also file
+  // it into the recording so the decision is part of that artifact.
   if (msg.type === 'OVERLAY_ACTION') {
     const tabId = sender && sender.tab && sender.tab.id;
-    const recorded = typeof tabId === 'number' && monitored.has(tabId);
-    if (recorded) {
-      emitMonitor(tabId, {
-        kind: 'annotation',
-        key: String(msg.key || '').slice(0, 120),
-        action: String(msg.action || '').slice(0, 24),
-        reason: String(msg.reason || '').slice(0, 400),
-        url: (sender.tab && sender.tab.url) || '',
-      });
+    const mark = {
+      key: String(msg.key || '').slice(0, 120),
+      action: String(msg.action || '').slice(0, 24),
+      reason: String(msg.reason || '').slice(0, 400),
+      url: (sender.tab && sender.tab.url) || '',
+    };
+    let delivered = false;
+    if (typeof tabId === 'number') {
+      sendToOffscreen({ type: 'WS_SEND', frame: { type: 'overlay_mark', tabId, ts: Date.now(), ...mark } }).catch(() => {});
+      delivered = true;
+      if (monitored.has(tabId)) emitMonitor(tabId, { kind: 'annotation', ...mark });
     }
-    sendResponse({ ok: true, recorded });
+    sendResponse({ ok: true, delivered, recorded: typeof tabId === 'number' && monitored.has(tabId) });
     return; // sync response
   }
 
@@ -1231,7 +1234,7 @@ function __aibridgeOverlay(rules) {
         e.preventDefault(); e.stopPropagation();
         try {
           chrome.runtime.sendMessage({ type: 'OVERLAY_ACTION', key: cut(rule.key, 120), action: act, reason: cut(inp.value, 400) })
-            .then((r) => { note.textContent = r && r.recorded ? 'Saved to the recording ✓' : 'Not recording this tab — start recording to save marks.'; })
+            .then((r) => { note.textContent = r && r.delivered ? 'Sent to your agent ✓' : 'Could not reach the bridge.'; })
             .catch(() => { note.textContent = 'Could not reach the bridge.'; });
         } catch (e2) { note.textContent = 'Could not reach the bridge.'; }
       });
