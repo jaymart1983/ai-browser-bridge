@@ -3,7 +3,15 @@
 // toggles ALL tabs and sets the default for new tabs. Activity = native
 // recordings view. Plus tools to query what was recorded.
 
+import { join } from 'node:path';
+
 const DEST = 'research-tabs';
+
+// Absolute on-disk dir for a session, so an agent with filesystem access can read the
+// raw capture (full network bodies, all screenshots) instead of the summarized view.
+function sessionDir(ctx, s) {
+  try { return join(ctx.monitor.MON_ROOTS[s.root], s.name); } catch { return null; }
+}
 
 const PRESETS = [
   { label: 'AutoTrader', pattern: '*.autotrader.com' },
@@ -92,7 +100,8 @@ function summarizeRecording(sel, events, limit) {
   if (marks.length) hints.push(`The USER marked ${marks.length} item(s) in-page (see userMarks) — record those decisions in your own list and re-annotate.`);
   if (screenshots.length) hints.push(`Call research_view_screenshot with session "${sel.id}" and a screenshot number to see the page.`);
   return {
-    session: sel.id, title: sel.title, url: sel.url, recording: sel.active, tabId: sel.tabId, counts,
+    session: sel.id, title: sel.title, url: sel.url, recording: sel.active, tabId: sel.tabId, dir: sel.dir || null, counts,
+    note: sel.dir ? `Network bodies below are truncated to ~300 chars. Full capture: ${sel.dir}/events.jsonl` : undefined,
     userMarks: marks,
     navigations: navigations.slice(-limit),
     network: network.slice(-limit),
@@ -129,7 +138,7 @@ export default {
 
   // Contributed to the MCP server's `instructions` on connect, so an agent learns this
   // workflow without the user pasting a prompt.
-  instructions: `Annotate what the user is browsing so they don't re-evaluate the same vehicles.
+  instructions: (ctx) => `Annotate what the user is browsing so they don't re-evaluate the same vehicles.
 
 Loop (roughly every 10-20s while they browse):
 1. browser_tabs_list -> the active research tab. (research_list_recordings if a tab is being recorded.)
@@ -142,7 +151,16 @@ Key facts:
 - ACV Auctions never renders the VIN — match by auctionId (it's in the listing links/URL). Pass both vin and auctionId when known; the mark key comes back as VIN@auctionId.
 - This bridge stores NOTHING. It only draws what you send. Keep the durable per-vehicle record yourself and persist after every decision. Annotations survive navigation, SPA routes and infinite scroll, but die when the browser closes — re-annotate from your list at the start of a session.
 - Only annotate what you actually know; no badge is better than a guessed one. If history isn't pulled, say so rather than implying a clean record.
-- ACV is read-only and low volume. Never bid.`,
+- ACV is read-only and low volume. Never bid.
+
+WHERE RECORDINGS LIVE ON DISK (only if you have filesystem access — otherwise use the tools):
+${(() => { try { const r = ctx.monitor.MON_ROOTS; return `  temporary: ${r.tmp}\n  permanent: ${r.perm}`; } catch { return '  (unavailable)'; } })()}
+Each session is a directory named <root>/<sessionName> containing:
+  events.jsonl   one JSON event per line: {kind:"network"|"navigation"|"screenshot"|"session"|"annotation", ts, ...}. Network events carry the FULL response body.
+  screenshots/   00001.jpg, 00002.jpg, ...
+  meta.json      title, favicon, url, counts
+research_list_recordings returns the absolute \`dir\` for each session, so read it from there rather than guessing.
+IMPORTANT: research_read_recording TRUNCATES network bodies to ~300 chars and caps entries by \`limit\`. When you need complete payloads (e.g. to pull every VIN out of a listing API response), read events.jsonl directly and parse the full \`body\` field. Tail it for a live feed.`,
 
   onEnable(ctx) {
     const existing = research(ctx).destinations && research(ctx).destinations[DEST];
@@ -151,9 +169,24 @@ Key facts:
 
   tools: {
     research_list_recordings: {
-      description: 'STEP 1 for reviewing a recorded page. Lists Deep Research recording sessions (a "recording" = everything captured while a tab was recorded: page navigations, network responses, and screenshots). Returns each session id (use it with research_read_recording / research_view_screenshot), tab title/url, event count, and whether it is still recording.',
+      description: [
+        'STEP 1 for reviewing a recorded page. Lists recording sessions (a "recording" = everything captured while a tab was recorded: navigations, network responses, screenshots).',
+        '',
+        'Each entry gives the session `id` (pass it to research_read_recording / research_view_screenshot), `tabId`, title/url, event count, whether it is still `recording`, and `dir` — the ABSOLUTE on-disk directory.',
+        '',
+        'If you have filesystem access, read `dir`/events.jsonl for the raw capture: one JSON event per line with FULL network response bodies (research_read_recording truncates them to ~300 chars). Screenshots are `dir`/screenshots/NNNNN.jpg. Tail events.jsonl for a live feed.',
+      ].join('\n'),
       inputSchema: { type: 'object', properties: {} },
-      async handler(_a, ctx) { return ctx.monitor.listSessions().map((s) => ({ id: s.id, tabId: s.tabId, title: s.title, url: s.url, events: s.count, recording: s.active })); },
+      async handler(_a, ctx) {
+        const roots = (() => { try { return ctx.monitor.MON_ROOTS; } catch { return {}; } })();
+        return {
+          storage: { tmp: roots.tmp || null, perm: roots.perm || null, layout: '<dir>/events.jsonl · <dir>/screenshots/NNNNN.jpg · <dir>/meta.json' },
+          sessions: ctx.monitor.listSessions().map((s) => ({
+            id: s.id, tabId: s.tabId, title: s.title, url: s.url,
+            events: s.count, recording: s.active, dir: sessionDir(ctx, s),
+          })),
+        };
+      },
     },
     research_read_recording: {
       description: 'STEP 2: review what was captured in a recording. Returns the timeline — page navigations, network requests (method/status/url with a short JSON body preview), and the list of screenshot numbers. Pass a session id from research_list_recordings, or omit for the most recent. Then call research_view_screenshot to SEE any screenshot.',
@@ -163,7 +196,7 @@ Key facts:
         const sel = args.session ? ss.find((s) => s.id === args.session || s.name === args.session) : ss[0];
         if (!sel) return { error: 'no recording found. Record a tab first (Deep Research config, or the extension popup "Record this tab").' };
         const { events } = ctx.monitor.readEvents(sel.name, sel.root, 0);
-        return summarizeRecording(sel, events, args.limit || 100);
+        return summarizeRecording({ ...sel, dir: sessionDir(ctx, sel) }, events, args.limit || 100);
       },
     },
     research_view_screenshot: {
