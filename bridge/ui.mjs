@@ -259,6 +259,7 @@ function configPage() {
           '<div class="row"><span class="grow">'+status+'</span>'
             +'<button id="chk">Check now</button>'
             +(canApply?'<button id="apply" class="primary">Update &amp; restart</button>':'')+'</div>'
+          +(d.warning?'<div class="mut" style="font-size:11px;margin-top:5px;color:var(--warn)">⚠ '+esc(d.warning)+'</div>':'')
           +'<div class="mut" style="font-size:12px;margin-top:6px">'+meta+'</div>'
           +'<label class="row" style="margin-top:10px;gap:8px;cursor:pointer"><input type="checkbox" id="auto"'+(d.autoUpdate?' checked':'')+'> '
             +'<span>Automatically install the latest release when available</span></label>';

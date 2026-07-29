@@ -96,28 +96,70 @@ export async function checkForUpdate() {
 }
 
 // ---- ZIP channel: download the release asset, swap files, update runtime -------
-// GitHub's public Releases API tells us the latest tag + asset URLs.
+// GitHub's public Releases API tells us the latest tag + asset URLs. It is limited to
+// 60 requests/hour per IP for unauthenticated callers, so it can 403 on a busy machine.
 async function githubLatestRelease(repo) {
   const r = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'browser-bridge-updater' } });
   if (r.status === 404) return null; // no releases published yet
-  if (!r.ok) throw new Error('GitHub API ' + r.status);
+  if (!r.ok) {
+    // Surface rate limiting as something the user can act on, with the reset time.
+    if (r.status === 403 || r.status === 429) {
+      const reset = Number(r.headers.get('x-ratelimit-reset')) || 0;
+      const when = reset ? new Date(reset * 1000).toLocaleTimeString() : '';
+      const e = new Error(`GitHub API rate limit reached${when ? ` (resets ${when})` : ''}`);
+      e.rateLimited = true;
+      throw e;
+    }
+    throw new Error('GitHub API ' + r.status);
+  }
   return r.json();
+}
+
+// Fallback that avoids the API entirely: github.com/<repo>/releases/latest 302-redirects
+// to /releases/tag/<tag>. That endpoint is not subject to the API rate limit, so updates
+// keep working when the API is throttled. Asset names are deterministic (see
+// scripts/build-release.mjs), so the download URL can be derived from the tag.
+async function githubLatestViaRedirect(repo, platform) {
+  const r = await fetch(`https://github.com/${repo}/releases/latest`, {
+    redirect: 'manual', headers: { 'user-agent': 'browser-bridge-updater' },
+  });
+  const loc = r.headers.get('location') || '';
+  const m = /\/releases\/tag\/(v?[\w.\-]+)/.exec(loc);
+  if (!m) throw new Error('could not resolve latest release without the API');
+  const tag = m[1];
+  const version = tag.replace(/^v/, '');
+  return {
+    tag_name: tag,
+    assets: [{ name: `browser-bridge-${platform}-v${version}.zip`, browser_download_url: `https://github.com/${repo}/releases/download/${tag}/browser-bridge-${platform}-v${version}.zip` }],
+  };
 }
 export async function getZipStatus() {
   const rt = readRuntime();
   const version = bridgeVersion();
   const platform = IS_WIN ? 'windows' : 'macos';
-  let latestVersion = null, assetUrl = null, error = null;
-  try {
-    const rel = rt.repo ? await githubLatestRelease(rt.repo) : null;
-    if (rel) {
-      latestVersion = String(rel.tag_name || '').replace(/^v/, '');
-      const a = (rel.assets || []).find((x) => x.name.includes(platform) && x.name.endsWith('.zip'));
-      assetUrl = a ? a.browser_download_url : null;
+  let latestVersion = null, assetUrl = null, error = null, warning = null;
+  const take = (rel) => {
+    if (!rel) return;
+    latestVersion = String(rel.tag_name || '').replace(/^v/, '');
+    const a = (rel.assets || []).find((x) => x.name.includes(platform) && x.name.endsWith('.zip'));
+    assetUrl = a ? a.browser_download_url : null;
+  };
+  if (rt.repo) {
+    try {
+      take(await githubLatestRelease(rt.repo));
+    } catch (e) {
+      // API unavailable (commonly a rate limit) → fall back to the non-API redirect so a
+      // throttled API doesn't block updating. Only a total failure becomes `error`.
+      try {
+        take(await githubLatestViaRedirect(rt.repo, platform));
+        warning = `${String((e && e.message) || e)} — used the non-API fallback.`;
+      } catch (e2) {
+        error = String((e && e.message) || e);
+      }
     }
-  } catch (e) { error = String((e && e.message) || e); }
+  }
   const behind = latestVersion && cmpSemver(latestVersion, version) > 0;
-  return { channel: 'zip', version, platform, repo: rt.repo || '', nodePinned: rt.node || '', nodeRunning: process.versions.node, latest: latestVersion, updateAvailable: !!(behind && assetUrl), assetUrl, autoUpdate: getAutoUpdate(), checkedAt: Date.now(), error };
+  return { channel: 'zip', version, platform, repo: rt.repo || '', nodePinned: rt.node || '', nodeRunning: process.versions.node, latest: latestVersion, updateAvailable: !!(behind && assetUrl), assetUrl, autoUpdate: getAutoUpdate(), checkedAt: Date.now(), error, warning };
 }
 
 // Download + swap in place. State/recordings/runtime aren't in the zip, so copying
