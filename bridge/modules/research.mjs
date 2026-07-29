@@ -83,13 +83,21 @@ function summarizeRecording(sel, events, limit) {
   const navigations = events.filter((e) => e.kind === 'navigation').map((e) => ({ ts: e.ts, url: e.url }));
   const network = events.filter((e) => e.kind === 'network').map((e) => ({ ts: e.ts, method: e.method || 'GET', status: e.status, url: e.url, body: preview(e.body) }));
   const screenshots = events.filter((e) => e.kind === 'screenshot').map((e) => Number(shotNum(e.file))).filter((n) => Number.isFinite(n));
-  const counts = { navigations: navigations.length, network: network.length, screenshots: screenshots.length, total: events.length };
+  // Marks the USER made on the page via the overlay badge (Pass / Watch / Note).
+  // These are decisions to act on, so they are never truncated by `limit`.
+  const marks = events.filter((e) => e.kind === 'annotation')
+    .map((e) => ({ ts: e.ts, key: e.key, action: e.action, reason: e.reason || '', url: e.url || '' }));
+  const counts = { navigations: navigations.length, network: network.length, screenshots: screenshots.length, marks: marks.length, total: events.length };
+  const hints = [];
+  if (marks.length) hints.push(`The USER marked ${marks.length} item(s) in-page (see userMarks) — record those decisions in your own list and re-annotate.`);
+  if (screenshots.length) hints.push(`Call research_view_screenshot with session "${sel.id}" and a screenshot number to see the page.`);
   return {
-    session: sel.id, title: sel.title, url: sel.url, recording: sel.active, counts,
+    session: sel.id, title: sel.title, url: sel.url, recording: sel.active, tabId: sel.tabId, counts,
+    userMarks: marks,
     navigations: navigations.slice(-limit),
     network: network.slice(-limit),
     screenshots,
-    hint: screenshots.length ? `Call research_view_screenshot with session "${sel.id}" and one of these numbers to see the page.` : 'No screenshots captured yet.',
+    hint: hints.join(' ') || 'Nothing captured yet.',
   };
 }
 
@@ -154,6 +162,43 @@ export default {
         const img = ctx.monitor.readShot(sel.name, sel.root, n);
         if (!img) return { error: `screenshot ${n} not found in ${sel.id}` };
         return { __mcpContent: [{ type: 'image', data: img.base64, mimeType: img.mime }] };
+      },
+    },
+    research_user_marks: {
+      description: [
+        'Poll this in a monitoring loop: returns every Pass / Watch / Note the USER clicked on an annotation badge, across all recordings, newest first.',
+        '',
+        'This is how the user tells you a decision while browsing. Each mark has the `key` you annotated with (e.g. the VIN), the `action` (pass|watch|note), the free-text `reason` they typed, the page `url`, its `tabId`, and `ts`.',
+        '',
+        'Record each decision in your own list, then re-annotate the tab so the new verdict shows. Use `since` (epoch ms) to fetch only marks newer than the last one you processed — otherwise you will see the same ones every poll.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          since: { type: 'number', description: 'epoch ms — return only marks with ts greater than this (pass the newest ts you have already handled)' },
+        },
+      },
+      async handler(args, ctx) {
+        const since = Number(args.since) || 0;
+        const out = [];
+        for (const s of ctx.monitor.listSessions()) {
+          let ev = [];
+          try { ev = ctx.monitor.readEvents(s.name, s.root, 0).events; } catch { continue; }
+          for (const e of ev) {
+            if (e.kind !== 'annotation') continue;
+            if (!(Number(e.ts) > since)) continue;
+            out.push({ ts: e.ts, key: e.key, action: e.action, reason: e.reason || '', url: e.url || '', tabId: s.tabId, session: s.id });
+          }
+        }
+        out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        return {
+          marks: out.slice(0, 200),
+          count: out.length,
+          newestTs: out.length ? out[0].ts : since,
+          hint: out.length
+            ? 'Save these decisions in your own list, then call research_annotate_vehicles again so the page reflects them. Pass newestTs back as `since` next poll.'
+            : 'No new marks. Poll again with the same `since`.',
+        };
       },
     },
     research_annotate_vehicles: {
