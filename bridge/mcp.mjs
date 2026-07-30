@@ -5,7 +5,7 @@
 // Protected by OAuth (requireToken); an unauthenticated request gets a 401.
 
 import { evaluate, toolVerb, resolveTabUrl } from './rules.mjs';
-import { allModuleTools, getModuleCtx, allInstructions } from './modules.mjs';
+import { allModuleTools, getModuleCtx, allInstructions, activeCapabilities } from './modules.mjs';
 
 // What every agent is told on connect. Deliberately short: per-tool detail lives in
 // each tool's own description, and per-capability workflow comes from the modules.
@@ -69,21 +69,25 @@ const TOOLS = {
     method: 'page.screenshot',
   },
   browser_monitor_start: {
+    capability: 'record',
     description: 'Start recording a tab (network + navigations + screenshots) to a session on disk.',
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' } }, required: ['tabId'] },
     method: 'monitor.start',
   },
   browser_monitor_stop: {
+    capability: 'record',
     description: 'Stop recording a tab.',
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' } }, required: ['tabId'] },
     method: 'monitor.stop',
   },
   browser_monitor_list: {
+    capability: 'record',
     description: 'List tabs currently being recorded.',
     inputSchema: { type: 'object', properties: {} },
     method: 'monitor.list',
   },
   browser_annotate: {
+    capability: 'annotate',
     description: [
       "Draw YOUR OWN notes onto a tab the user is actively browsing: a badge next to each thing you recognize, hover text with your reasoning, and optionally dim/strike its card so the user visually skips it.",
       '',
@@ -146,11 +150,13 @@ const TOOLS = {
     method: 'overlay.set',
   },
   browser_annotate_clear: {
+    capability: 'annotate',
     description: 'Remove annotations you drew on a tab. Pass `keys` to remove specific ones, or omit to clear the whole tab.',
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' }, keys: { type: 'array', items: { type: 'string' } } }, required: ['tabId'] },
     method: 'overlay.clear',
   },
   browser_annotate_list: {
+    capability: 'annotate',
     description: "Show which of YOUR annotations are currently on a tab and which are visible on screen right now — useful to confirm a rule matched. Reports only your own rules; it does not read page content (use browser_read for that).",
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' } }, required: ['tabId'] },
     method: 'overlay.list',
@@ -195,7 +201,12 @@ async function dispatch(msg, ctx) {
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list': {
-      const tools = { ...TOOLS, ...allModuleTools() };
+      // Capability-backed core tools (annotate, record, …) are only advertised while
+      // an enabled module declares that capability — the module also owns the rule
+      // objects that allow the verb, so without one the tool is pure noise.
+      const caps = activeCapabilities();
+      const core = Object.fromEntries(Object.entries(TOOLS).filter(([, t]) => !t.capability || caps.has(t.capability)));
+      const tools = { ...core, ...allModuleTools() };
       return rpcResult(id, { tools: Object.entries(tools).map(([name, t]) => ({ name, description: t.description, inputSchema: t.inputSchema })) });
     }
     case 'tools/call': {
@@ -204,6 +215,12 @@ async function dispatch(msg, ctx) {
       const core = TOOLS[name];
       const moduleTool = core ? null : allModuleTools()[name];
       if (!core && !moduleTool) return rpcError(id, -32602, `Unknown tool: ${name}`);
+      // Enforce the same capability gate on calls that tools/list applies — an agent
+      // must not reach a capability no enabled module provides (and whose rules
+      // therefore don't exist).
+      if (core && core.capability && !activeCapabilities().has(core.capability)) {
+        return rpcResult(id, { content: [{ type: 'text', text: `Unavailable: no enabled module provides the "${core.capability}" capability. The user can enable one at http://127.0.0.1:8787/modules.` }], isError: true });
+      }
       try {
         // Module-provided tool: runs in the bridge, allowed because its module is
         // enabled and the agent is OAuth-authorized (no browser target to gate).

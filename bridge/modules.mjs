@@ -177,6 +177,20 @@ export function allSources() {
 }
 export function allDestinations() { return getDestinations(); }
 
+// Extension capabilities in use by ENABLED modules. Core MCP tools that surface an
+// extension capability (annotate, record, …) are only advertised/callable while some
+// enabled module declares it via `capabilities: ['annotate']` in its manifest — the
+// module is also what seeds the rule objects that allow the verb, so without one the
+// tool could never pass policy anyway. Declaring the capability = owning its rules.
+export function activeCapabilities() {
+  const out = new Set();
+  for (const id of state.modulesEnabled) {
+    const mod = registry.get(id);
+    for (const c of (mod && mod.capabilities) || []) out.add(String(c));
+  }
+  return out;
+}
+
 // Server-level MCP `instructions` (returned on initialize) — how an agent should use
 // this bridge. A module contributes its own section via an `instructions` string (or a
 // function returning one), so guidance ships WITH the capability instead of relying on

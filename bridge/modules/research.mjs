@@ -128,6 +128,10 @@ export default {
   version: '0.1.0',
   description: 'Let any authorized agent read/navigate/control and record a chosen set of research tabs, and query what was captured.',
   autoEnable: true, // go live on first install without a manual toggle (one-time; a later manual disable sticks)
+  // Extension capabilities this module provides to agents. Core MCP tools backed by
+  // these (browser_annotate*, browser_monitor_*) are only advertised while a module
+  // declaring them is enabled — this module also seeds the rules that allow them.
+  capabilities: ['annotate', 'record'],
   artifacts: { sources: [], destinations: [{ id: DEST, name: 'Research Enabled Tabs', kind: 'dynamic', patterns: [] }] },
   // Rule id is versioned: setEnabled only adds rules whose id isn't already present,
   // so bumping it is how an existing install picks up a NEW permission verb. The old
@@ -151,6 +155,7 @@ Key facts:
 - ACV Auctions never renders the VIN — match by auctionId (it's in the listing links/URL). Pass both vin and auctionId when known; the mark key comes back as VIN@auctionId.
 - This bridge stores NOTHING. It only draws what you send. Keep the durable per-vehicle record yourself and persist after every decision. Annotations survive navigation, SPA routes and infinite scroll, but die when the browser closes — re-annotate from your list at the start of a session.
 - Only annotate what you actually know; no badge is better than a guessed one. If history isn't pulled, say so rather than implying a clean record.
+- Use these annotate tools — do NOT inject your own overlay UI into pages via browser_eval. The built-in overlay is provenance-marked, style-isolated, survives navigation, and its marks flow back to you signed; a hand-rolled one has none of that and clutters the user's page.
 - ACV is read-only and low volume. Never bid.
 
 WHERE RECORDINGS LIVE ON DISK (only if you have filesystem access — otherwise use the tools):
