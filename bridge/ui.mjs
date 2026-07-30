@@ -4,9 +4,9 @@
 
 import { state, save } from './state.mjs';
 import { PERMISSIONS } from './rules.mjs';
-import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, uploadModule, deleteModule } from './modules.mjs';
+import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall } from './modules.mjs';
 import { listAgents, listPending, listStale, revokeAgent, removeClient } from './oauth.mjs';
-import { pairingStatus } from './pairing.mjs';
+import { pairingStatus, verifyDecision } from './pairing.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -302,8 +302,8 @@ function modulesPage() {
       document.getElementById('upMsg').textContent='Uploading…';
       const r=await fetch('/modules/upload',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:f.name,code})});
       const j=await r.json();
-      document.getElementById('upMsg').textContent = j.added&&j.added.length ? 'Added: '+j.added.join(', ') : (j.ok? 'Saved (no new module id detected — check the file exports a default manifest).' : 'Failed');
-      setTimeout(()=>location.reload(),700);
+      document.getElementById('upMsg').textContent = j.ok ? 'Waiting for approval — open the extension popup (● badge) and approve the install.' : ('Failed: '+(j.error||''));
+      if (j.ok) setTimeout(()=>location.reload(), 15000);
     };
     </script>`;
   return uiChrome('Modules', `<h2>Capability modules</h2><p class="mut">Each module adds artifacts, tools, and rules. Nothing is permitted until a module is enabled and a rule allows it.</p>${rows}${upload}`, '/modules');
@@ -391,9 +391,21 @@ export async function uiRoutes(req, res, url) {
 
   if (req.method === 'GET' && p === '/modules') { htmlRes(res, modulesPage()); return true; }
   if (req.method === 'POST' && p === '/modules/toggle') { const { form } = await readBody(req); setEnabled(String(form.id), form.enabled === '1'); redirect(res, '/modules'); return true; }
+  // Uploading a module is arbitrary code execution in the bridge, and this route is
+  // loopback-only but unauthenticated — so it only STAGES the install. The code is
+  // written/executed exclusively after a human approves in the extension popup
+  // (signed with the pairing key, verified below at /modules/decision).
   if (req.method === 'POST' && p === '/modules/upload') {
     let b = {}; try { b = JSON.parse(await readRaw(req) || '{}'); } catch {}
-    jsonRes(res, await uploadModule(b.name, b.code)); return true;
+    jsonRes(res, requestModuleInstall(b.name, b.code)); return true;
+  }
+  if (req.method === 'POST' && p === '/modules/decision') {
+    let b = {}; try { b = JSON.parse(await readRaw(req) || '{}'); } catch {}
+    const approve = b.approve === true || b.approve === 1 || b.approve === '1';
+    if (!verifyDecision(String(b.reqId || ''), approve, b.mac)) {
+      jsonRes(res, { ok: false, error: 'approval must be signed by the paired browser (approve in the extension popup)' }, 403); return true;
+    }
+    jsonRes(res, await decideModuleInstall(String(b.reqId || ''), approve)); return true;
   }
   if (req.method === 'POST' && p === '/modules/delete') { const { form } = await readBody(req); await deleteModule(String(form.id)); redirect(res, '/modules'); return true; }
 

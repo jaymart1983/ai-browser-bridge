@@ -19,9 +19,19 @@ function stableStringify(v) {
 }
 function canon(frame) { return frame.id + '\n' + frame.method + '\n' + stableStringify(frame.params || {}); }
 
-// The key used to sign relayed frames = the ACTIVE browser's key (falling back to
-// a legacy single-pairing key if one is still present).
+// EMBEDDED MODE: no interactive pairing. The host application launches both the
+// bridge and its extension with a shared per-launch token; both sides derive the
+// frame-signing key as SHA-256(token), so the existing signed-frame verification
+// works unchanged with zero ceremony. Set once at boot by server.mjs.
+let embeddedKey = null;
+export function configureEmbeddedPairing(tokenUtf8) {
+  embeddedKey = tokenUtf8 ? createHash('sha256').update(String(tokenUtf8), 'utf8').digest('hex') : null;
+}
+
+// The key used to sign relayed frames = the embedded key when in embedded mode,
+// else the ACTIVE browser's key (falling back to a legacy single-pairing key).
 function activeKey() {
+  if (embeddedKey) return embeddedKey;
   const b = state.activeBrowser && state.browsers[state.activeBrowser];
   if (b && b.key) return b.key;
   return (state.pairing && state.pairing.key) || null;
@@ -31,6 +41,7 @@ export function isPaired() { return !!activeKey(); }
 // Backward-compatible status for the popup/Config "linked" line — reflects the
 // ACTIVE browser (or the legacy pairing).
 export function pairingStatus() {
+  if (embeddedKey) return { paired: true, created: 0, embedded: true };
   const b = state.activeBrowser && state.browsers[state.activeBrowser];
   if (b) return { paired: true, created: b.created || 0, activeBrowser: b.id, activeName: b.name || '' };
   if (state.pairing && state.pairing.key) return { paired: true, created: state.pairing.created || 0 };
@@ -140,6 +151,7 @@ export function verifyMark(msg) {
   const canon = JSON.stringify([msg.ts, msg.tabId, msg.key, msg.action, msg.reason, msg.url]);
   const keys = Object.values(state.browsers || {}).map((b) => b.key).filter(Boolean);
   if (state.pairing && state.pairing.key) keys.push(state.pairing.key);
+  if (embeddedKey) keys.push(embeddedKey);
   for (const k of keys) {
     try {
       const expect = createHmac('sha256', Buffer.from(k, 'hex')).update(canon).digest('hex');
@@ -158,6 +170,7 @@ export function verifyDecision(reqId, approve, mac) {
   const msg = `${reqId}\n${approve ? 1 : 0}`;
   const keys = Object.values(state.browsers || {}).map((b) => b.key).filter(Boolean);
   if (state.pairing && state.pairing.key) keys.push(state.pairing.key);
+  if (embeddedKey) keys.push(embeddedKey);
   for (const k of keys) {
     try {
       const expect = createHmac('sha256', Buffer.from(k, 'hex')).update(msg).digest('hex');

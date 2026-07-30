@@ -83,7 +83,10 @@ export function matchPattern(pattern, url) {
 // Only applies to core browser tools (TOOL_VERB); module tools are handled by
 // the caller (allowed when the module is on).
 export function evaluate(sourceName, targetUrl, toolName) {
-  const verb = TOOL_VERB[toolName];
+  // Third arg is a core tool name OR a bare verb (module tools declare one of the
+  // closed set read|write|control|record|annotate — never a made-up verb, so rules
+  // stay meaningful to users who have never heard of the module).
+  const verb = TOOL_VERB[toolName] || (PERMISSIONS.includes(toolName) ? toolName : null);
   if (!verb) return { allow: false, reason: `unknown tool '${toolName}'` };
   const nonTargeted = NON_TARGETED.has(toolName) || !targetUrl;
   for (const r of (state.rules || [])) {

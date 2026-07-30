@@ -21,6 +21,7 @@
 //     processes must send the valid access code (as `token`) on every request.
 
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, statSync, renameSync, cpSync, rmSync } from 'node:fs';
@@ -30,13 +31,13 @@ import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle } from './mcp.mjs';
-import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark } from './pairing.mjs';
+import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
-import { listTabActions, invokeTabAction } from './modules.mjs';
+import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -45,6 +46,42 @@ const AGENT_PATH = '/agent';
 const COMMAND_PATH = '/command';
 const COMMAND_TIMEOUT_MS = Number(process.env.BRIDGE_TIMEOUT_MS || 30000);
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB (screenshots/HTML can be large)
+
+// ---------------------------------------------------------------------------
+// EMBEDDED MODE — the bridge as an invisible component of a host application.
+// The relay, MCP dispatch, module loading, rules engine and state are EXACTLY the
+// standalone code paths; only the surface area changes:
+//   * no tray, no web control plane, no OAuth AS, no /command, no update checker
+//   * POST /mcp + GET /health require a per-launch bearer (BRIDGE_EMBEDDED_TOKEN)
+//   * unauthenticated requests get an indistinguishable 404 — an embedded instance
+//     must not be discoverable or identifiable by anything scanning loopback
+//   * the extension authenticates the WS upgrade with the same token, and its
+//     Origin must EXACTLY equal BRIDGE_EMBEDDED_EXT_ORIGIN; pairing is disabled
+//     (both sides derive the frame-signing key as SHA-256(token))
+// ---------------------------------------------------------------------------
+const EMBEDDED = process.env.BRIDGE_EMBEDDED === '1';
+const EMBEDDED_TOKEN = process.env.BRIDGE_EMBEDDED_TOKEN || '';
+const EMBEDDED_EXT_ORIGIN = process.env.BRIDGE_EMBEDDED_EXT_ORIGIN || '';
+const EMBEDDED_SOURCE = process.env.BRIDGE_EMBEDDED_SOURCE || 'Host App'; // rule-engine source name for the host's calls
+if (EMBEDDED) {
+  // Fail CLOSED on misconfiguration — never boot half-locked-down.
+  if (EMBEDDED_TOKEN.length < 16) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_TOKEN (>= 16 chars)'); process.exit(1); }
+  if (!/^(chrome|moz)-extension:\/\/[a-z0-9-]+$/i.test(EMBEDDED_EXT_ORIGIN)) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_EXT_ORIGIN (e.g. chrome-extension://<id>)'); process.exit(1); }
+}
+function timingSafeStr(a, b) {
+  const A = Buffer.from(String(a)), B = Buffer.from(String(b));
+  return A.length === B.length && timingSafeEqual(A, B);
+}
+function embeddedBearerOk(req) {
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  return !!(m && timingSafeStr(m[1], EMBEDDED_TOKEN));
+}
+// requireToken/wwwAuthenticate for /mcp in embedded mode (replaces OAuth).
+function embeddedRequireToken(authHeader) {
+  const m = /^Bearer\s+(.+)$/i.exec(authHeader || '');
+  if (!(m && timingSafeStr(m[1], EMBEDDED_TOKEN))) return null;
+  return { client_id: 'embedded-host', name: EMBEDDED_SOURCE };
+}
 
 // The bridge's own version, read from its package.json. Reported by /health.
 const BRIDGE_VERSION = (() => {
@@ -145,6 +182,27 @@ const server = http.createServer((req, res) => {
 
   const url = new URL(req.url, `http://${host}`);
 
+  // EMBEDDED MODE: whitelist, not blacklist. Only POST /mcp and GET /health exist,
+  // both behind the launch bearer; every other path — the web control plane, OAuth,
+  // /command, monitor endpoints — returns the same 404 an unknown path gets, and an
+  // unauthenticated /health does too, so the instance is not discoverable.
+  if (EMBEDDED) {
+    const p = url.pathname;
+    const known = (req.method === 'POST' && p === '/mcp') || (req.method === 'GET' && p === '/health');
+    if (!known || !embeddedBearerOk(req)) {
+      // /mcp gets a proper 401 challenge so a legitimate host client can recover;
+      // everything else (including unauth /health) is indistinguishable from 404.
+      if (req.method === 'POST' && p === '/mcp') {
+        return sendJson(res, 401, { error: { code: 'UNAUTHORIZED', message: 'Bearer token required.' } });
+      }
+      return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown path.' } });
+    }
+    if (p === '/health') {
+      return sendJson(res, 200, { ok: true, service: 'browser-bridge', version: BRIDGE_VERSION, embedded: true, agentConnected: agentConnected() });
+    }
+    return void mcpHandle(req, res, url, { relay: relayCommand, requireToken: embeddedRequireToken, wwwAuthenticate: () => 'Bearer' });
+  }
+
   if (req.method === 'GET' && url.pathname === '/health') {
     return sendJson(res, 200, {
       ok: true,
@@ -220,7 +278,7 @@ const server = http.createServer((req, res) => {
 
   // Bridge management for the extension popup (loopback only).
   if (req.method === 'GET' && url.pathname === '/bridge/status') {
-    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), stale: listStale(), browsers: listBrowsers(connectedBrowserIds()), activeBrowser: state.activeBrowser, agentConnected: agentConnected() });
+    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), pendingModules: listModuleInstalls(), stale: listStale(), browsers: listBrowsers(connectedBrowserIds()), activeBrowser: state.activeBrowser, agentConnected: agentConnected() });
   }
   if (req.method === 'POST' && url.pathname === '/bridge/revoke') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b.client_id ? revokeAgent(String(b.client_id)) : { ok: false, error: 'client_id required' }));
@@ -442,6 +500,20 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
+  // EMBEDDED MODE: only the host application's own extension may attach — the
+  // Origin must EXACTLY equal the configured extension origin AND the upgrade must
+  // carry the launch token (?token=). A stock extension in another browser (any
+  // other chrome-extension:// origin) is refused before the socket exists.
+  if (EMBEDDED) {
+    let token = '';
+    try { token = new URL(req.url, `http://${host || '127.0.0.1'}`).searchParams.get('token') || ''; } catch { /* reject below */ }
+    if (origin !== EMBEDDED_EXT_ORIGIN || !timingSafeStr(token, EMBEDDED_TOKEN)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+  }
+
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit('connection', ws, req);
   });
@@ -454,7 +526,14 @@ function notifyActive() {
 }
 // Let OAuth push the pending-request count so every linked browser badges its icon
 // (auth is bridge-wide, not tied to one browser).
-configureOAuth({ notifyPending: (n) => broadcastToAgents({ type: 'pending', count: n }) });
+// The extension badge shows EVERYTHING awaiting a human: OAuth consents + module
+// install approvals. Both queues ping this shared counter.
+const pendingTotal = () => listPending().length + listModuleInstalls().length;
+const pushPendingCount = () => broadcastToAgents({ type: 'pending', count: pendingTotal() });
+configureOAuth({ notifyPending: pushPendingCount });
+configureModuleApprovals({ notify: pushPendingCount });
+// EMBEDDED MODE: derive the frame-signing key from the launch token (no pairing).
+if (EMBEDDED) configureEmbeddedPairing(EMBEDDED_TOKEN);
 // After a self-update that changed extension/ source, tell connected extensions to
 // reload so they pick up the new code (they run unpacked from the same git clone).
 configureUpdater({ onExtensionUpdated: () => broadcastToAgents({ type: 'reload_extension' }) });
@@ -462,7 +541,7 @@ configureUpdater({ onExtensionUpdated: () => broadcastToAgents({ type: 'reload_e
 wss.on('connection', (ws) => {
   log('extension agent connected');
   legacySocket = ws; // fallback target until (unless) it identifies via hello/pair
-  sendToOneAgent(ws, { type: 'pending', count: listPending().length }); // sync the badge on connect
+  sendToOneAgent(ws, { type: 'pending', count: pendingTotal() }); // sync the badge on connect
 
   ws.on('message', (data) => {
     let msg;
@@ -488,6 +567,8 @@ wss.on('connection', (ws) => {
     // Pairing handshake: extension sends its ECDH public key (+ its browser id);
     // we derive the shared HMAC key for THAT browser and return ours.
     if (msg.type === 'pair_init' && typeof msg.pub === 'string') {
+      // EMBEDDED MODE: no interactive pairing exists — the token IS the trust.
+      if (EMBEDDED) { log('pair_init rejected (embedded mode)'); return; }
       try {
         // Pairing is a deliberate human action: the user clicks "Link" in the extension
         // popup, which sends this pair_init. There is no hands-free/auto-pair path — no
@@ -875,10 +956,10 @@ server.listen(PORT, HOST, () => {
   log(`  tools POST:   http://${HOST}:${PORT}${COMMAND_PATH}`);
   log(`  perm storage: ${MON_ROOTS.perm}`);
   // Optional menubar tray (blue running / green recording). Never fatal.
-  startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: quitBridge })
+  if (!EMBEDDED) startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: quitBridge })
     .then((ok) => log(ok ? 'tray icon started' : 'tray icon unavailable (bridge runs without it)'));
   // Opt-in self-update checker (fetches origin periodically; applies only if enabled).
-  try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); }
+  if (!EMBEDDED) { try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); } } // embedded: the host owns updates
 });
 
 server.on('error', (e) => {

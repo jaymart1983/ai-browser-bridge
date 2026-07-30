@@ -1,0 +1,78 @@
+# Embedded mode
+
+Embedded mode lets a **host application** run the real bridge as an internal component —
+same relay, same MCP dispatch, same module loading, same rules engine, same state handling
+as standalone — with the user-facing surface removed. Upstream fixes flow into the host by
+updating the bridge, not by maintaining a fork.
+
+## Launching
+
+```
+BRIDGE_EMBEDDED=1
+BRIDGE_EMBEDDED_TOKEN=<random, >= 16 chars>          # per-launch bearer + extension auth
+BRIDGE_EMBEDDED_EXT_ORIGIN=chrome-extension://<id>   # the ONLY origin allowed to attach
+BRIDGE_EMBEDDED_SOURCE=<name>                        # optional; rule-engine source name
+                                                     # for the host's calls (default "Host App")
+BRIDGE_PORT=<port>                                   # optional (default 8787)
+BRIDGE_STATE_FILE=<path>                             # optional; honored ONLY in embedded mode
+node bridge/server.mjs
+```
+
+The bridge exits immediately if `BRIDGE_EMBEDDED=1` is set without a valid token or
+extension origin — it never boots half-locked-down.
+
+## What changes
+
+| Surface | Standalone | Embedded |
+|---|---|---|
+| Tray, update checker | on | off (the host owns both) |
+| Web control plane (`/`, `/config`, `/modules*`, `/rules*`, …) | loopback UI | **404** |
+| OAuth AS (`/oauth/*`, `/.well-known/*`) | DCR + consent | **404** |
+| `/command` legacy relay | trusted-local | **404** |
+| `POST /mcp` | OAuth bearer | `BRIDGE_EMBEDDED_TOKEN` bearer (constant-time) |
+| `GET /health` | open | requires the bearer; unauthenticated → **404** |
+| Anything else | route-dependent | **404**, indistinguishable from an unknown path |
+| WS `/agent` upgrade | any `chrome-extension://` origin | origin must **exactly** equal `BRIDGE_EMBEDDED_EXT_ORIGIN` **and** carry `?token=` |
+| Pairing (`pair_init`) | user clicks Link | rejected — the token is the trust |
+
+An unauthenticated scanner on loopback cannot distinguish an embedded bridge from a
+closed port's 404s: no service name, no version, no route shape.
+
+## Extension side
+
+The host ships this repo's extension unmodified and writes **`embedded.json`** into the
+extension directory before loading it:
+
+```json
+{ "token": "<same value as BRIDGE_EMBEDDED_TOKEN>", "bridgeUrl": "ws://127.0.0.1:8787/agent" }
+```
+
+When that file is present the extension appends `?token=` to the WS upgrade, derives the
+frame-signing key as `SHA-256(token)` (the bridge derives the same key, so the existing
+per-frame HMAC verification works unchanged), and disables interactive pairing — the
+popup shows "Managed by host application".
+
+## Rule-engine identity
+
+Calls through `/mcp` evaluate with the source name `BRIDGE_EMBEDDED_SOURCE`. Rules are
+seeded by modules exactly as in standalone (there is no UI, so modules should declare
+`autoEnable: true` and ship the base rules they need).
+
+## Module tools and verbs
+
+A module tool may declare a `verb` from the closed vocabulary
+`read | write | control | record | annotate`:
+
+```js
+tools: {
+  fetch_thing:  { verb: 'read',  description, inputSchema, handler },
+  apply_change: { verb: 'write', description, inputSchema, handler },
+}
+```
+
+Declared-verb tools are evaluated by the rules engine exactly like core tools:
+`(source → destination : verb)`, with the target URL derived from the call's `tabId`,
+`url`, or `host` argument (none → evaluated on source + verb alone). A rule like
+*"Any Agent → jira : deny write"* therefore covers module tools too, and stays
+meaningful to a user who has never heard of the module. A tool with **no** verb keeps
+the previous ungated behaviour (the module self-gates); don't invent new verbs.

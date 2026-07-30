@@ -279,6 +279,23 @@ async function dispatch(msg, ctx) {
         // Module-provided tool: runs in the bridge, allowed because its module is
         // enabled and the agent is OAuth-authorized (no browser target to gate).
         if (moduleTool) {
+          // A module tool may declare a verb from the CLOSED vocabulary
+          // (read|write|control|record|annotate). When it does, the call goes through
+          // the same rule engine as core tools — policy stays in the bridge's own
+          // language, visible and editable in the Rules UI. The target URL is derived
+          // from the tool's args when present (tabId > url > host); with none, the
+          // rule is evaluated source+verb only. A tool with NO verb keeps the old
+          // ungated behaviour (backwards compatible; the module self-gates).
+          if (moduleTool.verb) {
+            let targetUrl = null;
+            if (typeof args.tabId === 'number') targetUrl = await resolveTabUrl(args.tabId);
+            else if (typeof args.url === 'string' && /^https?:/i.test(args.url)) targetUrl = args.url;
+            else if (typeof args.host === 'string' && args.host) targetUrl = 'https://' + String(args.host).replace(/^https?:\/\//i, '') + '/';
+            const decision = evaluate(ctx.sourceName, targetUrl, moduleTool.verb);
+            if (!decision.allow) {
+              return rpcResult(id, { content: [{ type: 'text', text: `Blocked by policy: ${decision.reason}` }], isError: true });
+            }
+          }
           const out = await moduleTool.handler(args, getModuleCtx());
           // A module tool may return rich MCP content (e.g. an image) via __mcpContent;
           // otherwise its return value is serialized as text.

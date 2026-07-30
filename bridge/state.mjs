@@ -9,7 +9,12 @@ import { fileURLToPath } from 'node:url';
 // State lives beside the bridge source (0600). It is gitignored, so both update
 // channels preserve it: the git channel fast-forwards tracked files only, and the
 // zip channel swaps tracked files in place — neither touches this file.
-const FILE = join(dirname(fileURLToPath(import.meta.url)), '.bridge-state.json');
+// EMBEDDED MODE ONLY: a host application running the bridge as an internal
+// component may relocate state via BRIDGE_STATE_FILE (its bundle dir is replaced
+// wholesale on update). Ignored in standalone mode — a normal install's state
+// location is not configurable.
+const FILE = (process.env.BRIDGE_EMBEDDED === '1' && process.env.BRIDGE_STATE_FILE)
+  || join(dirname(fileURLToPath(import.meta.url)), '.bridge-state.json');
 
 export const state = {
   clients: {},   // client_id -> { client_id, client_name, redirect_uris[], created }

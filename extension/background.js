@@ -332,8 +332,8 @@ async function ensureOffscreen() {
       creatingOffscreen = null;
     });
   await creatingOffscreen;
-  // Push the current bridge URL to the new document.
-  const bridgeUrl = await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
+  // Push the current bridge URL to the new document (embedded appends its token).
+  const bridgeUrl = await effectiveBridgeUrl();
   await sendToOffscreen({ type: 'CONFIG', bridgeUrl, version: VERSION }).catch(() => {});
 }
 
@@ -623,7 +623,41 @@ let pairKeyHex = null;   // cached derived key
 let pairEphemeral = null; // ECDH keypair held during an in-flight handshake
 let pairError = ''; // last pairing failure reason, surfaced to the popup
 
+// EMBEDDED MODE: a host application that bundles this extension writes
+// embedded.json into the extension directory: { "token": "...", "bridgeUrl"? }.
+// When present, the WS upgrade carries ?token=..., the frame-signing key is
+// SHA-256(token) on both sides (matching bridge/pairing.mjs), and interactive
+// pairing is disabled — the host owns the trust relationship.
+let embeddedConf; // undefined = not probed yet, null = absent, object = active
+async function getEmbedded() {
+  if (embeddedConf !== undefined) return embeddedConf;
+  embeddedConf = null;
+  try {
+    const r = await fetch(chrome.runtime.getURL('embedded.json'));
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.token === 'string' && d.token.length >= 16) {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(d.token));
+        embeddedConf = {
+          token: d.token,
+          bridgeUrl: typeof d.bridgeUrl === 'string' && d.bridgeUrl ? d.bridgeUrl : DEFAULT_BRIDGE_URL,
+          keyHex: bufToHex(digest),
+        };
+      }
+    }
+  } catch { /* no embedded.json → standalone */ }
+  return embeddedConf;
+}
+// The URL the offscreen document should connect to (embedded appends the token).
+async function effectiveBridgeUrl() {
+  const emb = await getEmbedded();
+  if (emb) return emb.bridgeUrl + (emb.bridgeUrl.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(emb.token);
+  return getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
+}
+
 async function getPairKey() {
+  const emb = await getEmbedded();
+  if (emb) return emb.keyHex;
   if (pairKeyHex) return pairKeyHex;
   pairKeyHex = await getLocal(K_PAIR_KEY, null);
   return pairKeyHex;
@@ -651,7 +685,7 @@ async function verifyFrameMac(cmd) {
 // never leaves the service worker) so the bridge knows a HUMAN in this paired
 // browser approved it — an unsigned local process cannot. The popup routes its
 // Approve/Deny clicks through here.
-async function submitOauthDecision(reqId, approve) {
+async function submitSignedDecision(path, reqId, approve) {
   const keyHex = await getPairKey();
   if (!keyHex) return { ok: false, error: 'This browser is not linked to the bridge.' };
   const key = await crypto.subtle.importKey('raw', hexToBuf(keyHex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -659,14 +693,20 @@ async function submitOauthDecision(reqId, approve) {
   const mac = bufToHex(sig);
   const base = (await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL)).replace(/^ws/, 'http').replace(/\/agent.*$/, '');
   try {
-    const r = await fetch(base + '/oauth/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reqId, approve: approve ? 1 : 0, mac }) });
+    const r = await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reqId, approve: approve ? 1 : 0, mac }) });
     return await r.json();
   } catch (e) { return { ok: false, error: String(e && e.message) }; }
 }
+const submitOauthDecision = (reqId, approve) => submitSignedDecision('/oauth/decision', reqId, approve);
+// Approve/deny a pending MODULE INSTALL (arbitrary JS staged via the web UI) —
+// same human-signed gate as OAuth consent, since installing a module is code
+// execution inside the bridge.
+const submitModuleDecision = (reqId, approve) => submitSignedDecision('/modules/decision', reqId, approve);
 
 // Kick off pairing: generate an ECDH keypair, send our public key to the bridge.
 // Only ever runs from a user-initiated "Link" click — there is no auto-pair path.
 async function startPairing() {
+  if (await getEmbedded()) return { ok: false, error: 'Pairing is managed by the host application.' };
   pairError = '';
   // Extractable so we can stash the private key: MV3 service workers get suspended,
   // and if that happens between pair_init and pair_ack an in-memory key would be
@@ -1723,6 +1763,7 @@ async function handlePopup(msg) {
         bridgeUrl,
         monitored: monitorList(),
         paired: !!(await getPairKey()),
+        embedded: !!(await getEmbedded()),
         browserId: ident.id,
         browserName: ident.name,
         pairError,
@@ -1737,6 +1778,10 @@ async function handlePopup(msg) {
     case 'unpair': {
       await clearPairing();
       return { ok: true };
+    }
+
+    case 'moduleDecision': {
+      return await submitModuleDecision(msg.reqId, !!msg.approve);
     }
 
     case 'oauthDecision': {
@@ -1760,7 +1805,7 @@ async function handlePopup(msg) {
         return { ok: false, error: 'Bridge URL must be ws(s)://127.0.0.1[:port]/path' };
       }
       await setLocal({ [K_BRIDGE_URL]: url });
-      await sendToOffscreen({ type: 'CONFIG', bridgeUrl: url, version: VERSION }).catch(() => {});
+      await sendToOffscreen({ type: 'CONFIG', bridgeUrl: await effectiveBridgeUrl(), version: VERSION }).catch(() => {}); // embedded config wins over a user-set URL
       return { ok: true };
     }
 

@@ -5,6 +5,7 @@
 // rules intact for re-enable. Deny-by-default: nothing is live until enabled.
 
 import { readdirSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { state, save } from './state.mjs';
@@ -64,8 +65,49 @@ export async function loadModules() {
   if (seenChanged) save();
 }
 
+// --- Module-install approval queue ------------------------------------------
+// Uploading a module = arbitrary JS executed inside the bridge. The web UI is
+// loopback-only but effectively unauthenticated, so an install must be approved
+// by a human in the EXTENSION (signed with the pairing key) before any code is
+// written or executed — the same gate OAuth consent uses. Requests are held in
+// memory only, capped, and expire unapproved.
+const pendingInstalls = new Map(); // reqId -> { reqId, name, code, created }
+const INSTALL_TTL_MS = 10 * 60 * 1000;
+let notifyApprovals = null;
+export function configureModuleApprovals(o) { notifyApprovals = (o && o.notify) || null; }
+function pingApprovals() { if (notifyApprovals) { try { notifyApprovals(pendingInstalls.size); } catch { /* best effort */ } } }
+function pruneInstalls() {
+  const cutoff = Date.now() - INSTALL_TTL_MS;
+  for (const [k, p] of pendingInstalls) if (p.created < cutoff) pendingInstalls.delete(k);
+}
+export function requestModuleInstall(name, code) {
+  pruneInstalls();
+  if (typeof code !== 'string' || !code.trim()) return { ok: false, error: 'code required' };
+  if (code.length > 1_000_000) return { ok: false, error: 'module too large (1 MB max)' };
+  if (pendingInstalls.size >= 10) return { ok: false, error: 'too many pending installs — approve or deny them first' };
+  const reqId = 'mi_' + randomBytes(9).toString('base64url');
+  pendingInstalls.set(reqId, { reqId, name: String(name || 'module').slice(0, 80), code, created: Date.now() });
+  pingApprovals();
+  return { ok: true, reqId };
+}
+export function listModuleInstalls() {
+  pruneInstalls();
+  return [...pendingInstalls.values()].map((p) => ({ reqId: p.reqId, name: p.name, bytes: p.code.length, created: p.created }));
+}
+// Caller MUST have verified the decision signature (pairing.verifyDecision) first.
+export async function decideModuleInstall(reqId, approve) {
+  const p = pendingInstalls.get(reqId);
+  if (!p) return { ok: false, error: 'no such request (expired?)' };
+  pendingInstalls.delete(reqId);
+  pingApprovals();
+  if (!approve) return { ok: true, installed: false };
+  const r = await uploadModule(p.name, p.code);
+  return { ok: true, installed: true, ...r };
+}
+
 // Write a new/updated module file and reload. `code` is arbitrary JS that will
-// be dynamically imported (executed in the bridge). Loopback-only + user-driven.
+// be dynamically imported (executed in the bridge). Reached ONLY via an approved
+// install request (decideModuleInstall) — never directly from an HTTP route.
 export async function uploadModule(name, code) {
   let base = String(name || 'module').replace(/\.mjs$/i, '').replace(/[^a-z0-9_-]/gi, '_').replace(/^_+|_+$/g, '');
   if (!base) base = 'module';

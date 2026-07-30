@@ -49,10 +49,19 @@ async function refresh() {
 
   $('agentsSection').classList.toggle('hidden', !s.wsConnected);
   $('navSection').classList.toggle('hidden', !s.wsConnected);
-  $('linkBtn').textContent = paired ? 'Unlink' : 'Link';
-  $('linkBtn').className = paired ? '' : 'primary';
-  $('linkBtn').disabled = !s.wsConnected;
-  $('linkBtn').title = !s.wsConnected ? 'Start the bridge first' : paired ? 'Unpair this browser' : 'Pair this browser with this local bridge';
+  if (s.embedded) {
+    // Embedded mode: the host application owns the trust relationship — no
+    // linking/unlinking from here.
+    $('linkBtn').textContent = 'Managed';
+    $('linkBtn').className = '';
+    $('linkBtn').disabled = true;
+    $('linkBtn').title = 'This bridge is managed by its host application.';
+  } else {
+    $('linkBtn').textContent = paired ? 'Unlink' : 'Link';
+    $('linkBtn').className = paired ? '' : 'primary';
+    $('linkBtn').disabled = !s.wsConnected;
+    $('linkBtn').title = !s.wsConnected ? 'Start the bridge first' : paired ? 'Unpair this browser' : 'Pair this browser with this local bridge';
+  }
 
   if (s.wsConnected) { renderTabActions(); renderAgents(); renderNav(); renderUpdate(); }
 }
@@ -171,20 +180,34 @@ async function renderAgents() {
   const box = $('agentList');
   box.innerHTML = '';
   const pend = data.pending || [];
+  const pendMods = data.pendingModules || [];
   const agents = data.agents || [];
   const stale = data.stale || [];
-  if (!pend.length && !agents.length && !stale.length) { box.innerHTML = '<div class="muted" style="font-size:11px;padding:4px 0">No agents yet. Add this bridge in your AI client, then approve it here.</div>'; return; }
-  for (const p of pend) {
+  if (!pend.length && !pendMods.length && !agents.length && !stale.length) { box.innerHTML = '<div class="muted" style="font-size:11px;padding:4px 0">No agents yet. Add this bridge in your AI client, then approve it here.</div>'; return; }
+  // Both pending kinds route through the service worker, which SIGNS the decision
+  // with the pairing key (the bridge rejects any unsigned approval — no
+  // self-granting by code). `action` picks the SW handler + bridge endpoint.
+  const pendRow = (label, sub, action, reqId) => {
     const row = document.createElement('div'); row.className = 'agent';
-    const nm = document.createElement('span'); nm.className = 'nm pend'; nm.textContent = '⏳ ' + p.name;
-    // Route through the service worker, which SIGNS the decision with the pairing
-    // key (the bridge rejects any unsigned approval — no self-granting by code).
+    const info = document.createElement('div');
+    info.style.cssText = 'display:flex;flex-direction:column;flex:1;min-width:0';
+    const nm = document.createElement('span'); nm.className = 'nm pend'; nm.textContent = label;
+    info.appendChild(nm);
+    if (sub) {
+      const s2 = document.createElement('span');
+      s2.style.cssText = 'font-size:10px;color:var(--mut)';
+      s2.textContent = sub;
+      info.appendChild(s2);
+    }
     const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = 'Approve';
-    ok.onclick = async () => { const r = await send('oauthDecision', { reqId: p.reqId, approve: true }); if (r && r.ok === false && r.error) nm.textContent = '⚠ ' + r.error; renderAgents(); };
+    ok.onclick = async () => { const r = await send(action, { reqId, approve: true }); if (r && r.ok === false && r.error) nm.textContent = '⚠ ' + r.error; renderAgents(); };
     const no = document.createElement('button'); no.className = 'no'; no.textContent = 'Deny';
-    no.onclick = async () => { await send('oauthDecision', { reqId: p.reqId, approve: false }); renderAgents(); };
-    row.append(nm, ok, no); box.appendChild(row);
-  }
+    no.onclick = async () => { await send(action, { reqId, approve: false }); renderAgents(); };
+    row.append(info, ok, no); box.appendChild(row);
+  };
+  for (const p of pend) pendRow('⏳ ' + p.name, '', 'oauthDecision', p.reqId);
+  // Module installs = JavaScript that will RUN inside the bridge. Say so plainly.
+  for (const m of pendMods) pendRow('⏳ Install module “' + m.name + '”', 'runs code in the bridge · ' + Math.round((m.bytes || 0) / 1024) + ' KB', 'moduleDecision', m.reqId);
   for (const a of agents) {
     const row = document.createElement('div'); row.className = 'agent';
     const info = document.createElement('div');
