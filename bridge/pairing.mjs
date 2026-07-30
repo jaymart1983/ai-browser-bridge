@@ -130,6 +130,25 @@ export function verifyMac(frame) {
   try { return timingSafeEqual(Buffer.from(frame.mac), Buffer.from(expect)); } catch { return false; }
 }
 
+// Verify an overlay mark (the user's in-page Pass/Watch/Note click) was signed by a
+// linked browser's pairing key. Same anti-fabrication gate as verifyDecision: only the
+// paired extension holds a key, so unsigned local code cannot forge "the user decided
+// X" and poison the agent's durable list. Canonical string MUST match the extension's
+// construction in background.js (JSON array of the signed fields, in this order).
+export function verifyMark(msg) {
+  if (!msg || !msg.mac) return false;
+  const canon = JSON.stringify([msg.ts, msg.tabId, msg.key, msg.action, msg.reason, msg.url]);
+  const keys = Object.values(state.browsers || {}).map((b) => b.key).filter(Boolean);
+  if (state.pairing && state.pairing.key) keys.push(state.pairing.key);
+  for (const k of keys) {
+    try {
+      const expect = createHmac('sha256', Buffer.from(k, 'hex')).update(canon).digest('hex');
+      if (timingSafeEqual(Buffer.from(msg.mac), Buffer.from(expect))) return true;
+    } catch { /* try next key */ }
+  }
+  return false;
+}
+
 // Verify an OAuth consent decision was signed by a LINKED browser's pairing key.
 // This is the anti-self-approval gate: only the paired extension (a human clicking
 // Approve) holds a key, so unsigned local code cannot approve a grant. Accepts a

@@ -64,7 +64,7 @@ const TOOLS = {
     method: 'page.eval',
   },
   browser_screenshot: {
-    description: 'Capture a PNG screenshot of the visible area of a tab.',
+    description: 'Capture a PNG screenshot of a tab. Only the tab currently VISIBLE in its window can be captured — a background tab returns a NOT_VISIBLE error rather than the wrong pixels. browser_activate_tab brings it forward first (that steals the user\'s focus, so prefer browser_read when you only need the content).',
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' } }, required: ['tabId'] },
     method: 'page.screenshot',
   },

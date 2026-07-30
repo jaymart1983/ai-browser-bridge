@@ -448,8 +448,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // The user marked an annotated item in-page (Pass / Watch / Note). We do NOT store
-  // it. It is always sent straight to the bridge as an `overlay_mark` frame, so this
-  // works WITHOUT the tab being recorded; when the tab IS being recorded we also file
+  // it. It is sent to the bridge as an `overlay_mark` frame — HMAC-signed with the
+  // pairing key so the bridge can prove a human's browser produced it (unsigned local
+  // code can't fabricate user decisions; same model as the OAuth approval signature).
+  // Works WITHOUT the tab being recorded; when the tab IS being recorded we also file
   // it into the recording so the decision is part of that artifact.
   if (msg.type === 'OVERLAY_ACTION') {
     const tabId = sender && sender.tab && sender.tab.id;
@@ -459,14 +461,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       reason: String(msg.reason || '').slice(0, 400),
       url: (sender.tab && sender.tab.url) || '',
     };
-    let delivered = false;
-    if (typeof tabId === 'number') {
-      sendToOffscreen({ type: 'WS_SEND', frame: { type: 'overlay_mark', tabId, ts: Date.now(), ...mark } }).catch(() => {});
-      delivered = true;
-      if (monitored.has(tabId)) emitMonitor(tabId, { kind: 'annotation', ...mark });
-    }
-    sendResponse({ ok: true, delivered, recorded: typeof tabId === 'number' && monitored.has(tabId) });
-    return; // sync response
+    (async () => {
+      if (typeof tabId !== 'number') return { ok: false, delivered: false, recorded: false };
+      const recorded = monitored.has(tabId);
+      if (recorded) emitMonitor(tabId, { kind: 'annotation', ...mark });
+      const ts = Date.now();
+      let mac = null;
+      try {
+        const keyHex = await getPairKey();
+        if (keyHex) {
+          const k = await crypto.subtle.importKey('raw', hexToBuf(keyHex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+          // Canonical string MUST match bridge/pairing.mjs verifyMark.
+          const canon = JSON.stringify([ts, tabId, mark.key, mark.action, mark.reason, mark.url]);
+          mac = bufToHex(await crypto.subtle.sign('HMAC', k, new TextEncoder().encode(canon)));
+        }
+      } catch { /* not linked / crypto unavailable */ }
+      // Honest delivery status: only claim delivery when the socket is up AND we
+      // could sign (the bridge drops unsigned marks).
+      const delivered = !!(wsConnected && mac);
+      if (delivered) sendToOffscreen({ type: 'WS_SEND', frame: { type: 'overlay_mark', tabId, ts, ...mark, mac } }).catch(() => {});
+      return { ok: true, delivered, recorded };
+    })().then(sendResponse).catch(() => sendResponse({ ok: false, delivered: false, recorded: false }));
+    return true; // async response
   }
 
   // Popup <-> SW control messages.
@@ -909,9 +925,14 @@ async function doPageExec(params) {
 async function doPageScreenshot(params) {
   const { tabId } = params;
   const tab = await chrome.tabs.get(tabId);
-  // captureVisibleTab grabs the *visible* tab of the given window. If the target
-  // tab is not the active tab in its window the capture will be of whatever IS
-  // visible there — documented caveat; callers should tab.activate first.
+  // captureVisibleTab can only capture the tab actually VISIBLE in its window.
+  // Returning some other tab's pixels labeled with this tabId would silently
+  // poison an agent's reasoning about the page — refuse instead and say how to
+  // proceed. (We deliberately do NOT auto-activate: stealing the user's focus is
+  // a `control` action the caller must take explicitly.)
+  if (!tab.active) {
+    throw new CmdError('NOT_VISIBLE', `Tab ${tabId} is not the visible tab of its window — screenshots capture only the visible tab. Activate it first (tab.activate) or use page.read for content.`);
+  }
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   return { tabId, dataUrl };
 }
@@ -1150,7 +1171,7 @@ async function overlayStore(tabId, rules) {
 // just re-renders, so this is safe to call repeatedly.
 async function overlayPush(tabId, rules) {
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: __aibridgeOverlay, args: [rules || []] });
+    await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED', func: __bridgeOverlay, args: [rules || []] });
     return true;
   } catch (e) { return false; } // chrome://, PDF viewer, etc.
 }
@@ -1158,20 +1179,27 @@ async function overlayPush(tabId, rules) {
 // The overlay engine, injected into the ISOLATED world. Must be self-contained
 // (no closure over extension scope) and idempotent — executeScript re-runs it on
 // every update and on every navigation.
-function __aibridgeOverlay(rules) {
-  const MARK = 'data-aibridge-ann';
-  const DIM = '__aibridge-dim', STRIKE = '__aibridge-strike', HIDE = '__aibridge-hide';
-  const S = window.__aibridgeOverlayState || (window.__aibridgeOverlayState = { rules: [], timer: null });
+function __bridgeOverlay(rules) {
+  const MARK = 'data-bridge-ann';
+  const LEGACY_MARK = 'data-aibridge-ann'; // pre-rename injections — always cleaned up
+  const DIM = '__bridge-dim', STRIKE = '__bridge-strike', HIDE = '__bridge-hide';
+  const S = window.__bridgeOverlayState || (window.__bridgeOverlayState = { rules: [], timer: null, rtimer: null, rendering: false, panels: new Set() });
   S.rules = Array.isArray(rules) ? rules : [];
+  // Neutralize a pre-rename engine left injected before an extension reload: emptying
+  // its rule set stops its own observer from re-rendering stale badges alongside ours.
+  try { if (window.__aibridgeOverlayState) window.__aibridgeOverlayState.rules = []; } catch (e) {}
 
   const cut = (v, n) => String(v == null ? '' : v).slice(0, n);
   // Only allow simple CSS color tokens — this value lands in a stylesheet.
   const safeColor = (c) => (/^(#[0-9a-f]{3,8}|rgba?\([\d.,%\s]+\)|[a-z]{3,20})$/i.test(String(c || '')) ? String(c) : '#3b82f6');
+  const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   function ensureStyle() {
-    if (document.getElementById('__aibridge-ann-style')) return;
+    const legacy = document.getElementById('__aibridge-ann-style');
+    if (legacy) legacy.remove();
+    if (document.getElementById('__bridge-ann-style')) return;
     const st = document.createElement('style');
-    st.id = '__aibridge-ann-style';
+    st.id = '__bridge-ann-style';
     st.textContent =
       '.' + DIM + '{opacity:.4 !important;filter:grayscale(.8) !important}' +
       '.' + STRIKE + '{text-decoration:line-through !important;text-decoration-color:#f85149 !important;text-decoration-thickness:2px !important}' +
@@ -1180,8 +1208,10 @@ function __aibridgeOverlay(rules) {
   }
 
   function clearAll() {
-    document.querySelectorAll('[' + MARK + ']').forEach((n) => n.remove());
-    [DIM, STRIKE, HIDE].forEach((c) => document.querySelectorAll('.' + c).forEach((n) => n.classList.remove(c)));
+    document.querySelectorAll('[' + MARK + '],[' + LEGACY_MARK + ']').forEach((n) => n.remove());
+    [DIM, STRIKE, HIDE, '__aibridge-dim', '__aibridge-strike', '__aibridge-hide']
+      .forEach((c) => document.querySelectorAll('.' + c).forEach((n) => n.classList.remove(c)));
+    S.panels.clear();
   }
 
   // Badge lives in a CLOSED shadow root inside an `all:initial` host, so page CSS
@@ -1202,6 +1232,7 @@ function __aibridgeOverlay(rules) {
       '.p{position:absolute;z-index:2147483647;left:0;top:calc(100% + 5px);min-width:210px;max-width:340px;background:#14161b;color:#e6e8ec;' +
       'border:1px solid #2a2f3a;border-radius:8px;padding:9px 10px;box-shadow:0 8px 26px rgba(0,0,0,.5);display:none;cursor:default;text-align:left}' +
       '.b:hover .tip,.p.open{display:block}' +
+      '.b.mopen .tip{display:none !important}' +
       '.h{font-size:9px;text-transform:uppercase;letter-spacing:.5px;opacity:.5;margin-bottom:5px;font-weight:700}' +
       '.tx{font-size:11px;font-weight:400;line-height:1.5;white-space:pre-wrap;word-break:break-word}' +
       '.row{display:flex;gap:5px;margin-top:9px}' +
@@ -1213,18 +1244,23 @@ function __aibridgeOverlay(rules) {
     const lb = document.createElement('span'); lb.textContent = cut((rule.badge && rule.badge.label) || 'note', 56);
     b.append(mk, lb);
 
-    // Hover detail
+    // Hover detail (suppressed via .mopen while the mark panel is open).
     const tip = document.createElement('span'); tip.className = 'p tip';
     const th = document.createElement('span'); th.className = 'h'; th.textContent = 'Browser Bridge · note';
     const tt = document.createElement('span'); tt.className = 'tx';
     tt.textContent = cut((rule.badge && rule.badge.tooltip) || (rule.badge && rule.badge.label) || '', 900);
     tip.append(th, tt);
 
-    // Click → mark menu (reported back to the bridge, which files it into the
-    // active recording so the agent can pick it up).
+    // Click → mark menu. The mark is HMAC-signed by the service worker and sent to
+    // the bridge (and into the recording when the tab is recorded).
     const pan = document.createElement('span'); pan.className = 'p';
     const ph = document.createElement('span'); ph.className = 'h'; ph.textContent = 'Mark ' + (cut(rule.key, 24) || 'this');
     const inp = document.createElement('input'); inp.placeholder = 'reason (optional)';
+    // Typing in the reason field must not bubble to the badge toggle (which would
+    // close the panel mid-click) or to the page's own hotkey handlers.
+    for (const ev of ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress']) {
+      inp.addEventListener(ev, (e) => e.stopPropagation());
+    }
     const row = document.createElement('span'); row.className = 'row';
     const note = document.createElement('span'); note.className = 'tx'; note.style.cssText = 'display:block;margin-top:7px;opacity:.6';
     for (const act of ['pass', 'watch', 'note']) {
@@ -1234,7 +1270,10 @@ function __aibridgeOverlay(rules) {
         e.preventDefault(); e.stopPropagation();
         try {
           chrome.runtime.sendMessage({ type: 'OVERLAY_ACTION', key: cut(rule.key, 120), action: act, reason: cut(inp.value, 400) })
-            .then((r) => { note.textContent = r && r.delivered ? 'Sent to your agent ✓' : 'Could not reach the bridge.'; })
+            .then((r) => {
+              note.textContent = r && r.delivered ? 'Sent to your agent ✓'
+                : (r && r.recorded ? 'Saved to the recording ✓' : 'Bridge offline — mark not delivered.');
+            })
             .catch(() => { note.textContent = 'Could not reach the bridge.'; });
         } catch (e2) { note.textContent = 'Could not reach the bridge.'; }
       });
@@ -1242,9 +1281,15 @@ function __aibridgeOverlay(rules) {
     }
     pan.append(ph, inp, row, note);
 
+    const ref = { host, close: () => setOpen(false) };
+    function setOpen(open) {
+      pan.classList.toggle('open', open);
+      b.classList.toggle('mopen', open);
+      if (open) S.panels.add(ref); else S.panels.delete(ref);
+    }
     b.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
-      pan.classList.toggle('open');
+      setOpen(!pan.classList.contains('open'));
     });
     b.append(tip, pan);
     sh.append(st, b);
@@ -1255,14 +1300,25 @@ function __aibridgeOverlay(rules) {
     return new RegExp('^' + String(p).replace(/[.*+?^${}()|[\]\\]/g, (m) => (m === '*' ? '.*' : '\\' + m)) + '$', 'i');
   }
 
-  // Nearest ancestor that looks like a listing card, for dim/strike.
-  function cardOf(el, sel) {
+  function applyCard(c, card) {
+    if (card.dim) c.classList.add(DIM);
+    if (card.strike) c.classList.add(STRIKE);
+    if (card.hide) c.classList.add(HIDE);
+  }
+
+  // Nearest ancestor that looks like a listing card, for dim/strike. Refuses any
+  // container that also holds a DIFFERENT rule's match — that container spans more
+  // than one listing, and dimming it would strike an innocent neighbour.
+  function cardOf(el, sel, key, targets) {
     if (sel) { try { const c = el.closest(sel); if (c) return c; } catch (e) {} }
     let n = el;
     for (let i = 0; i < 12 && n && n.parentElement && n.parentElement !== document.body; i++) {
       n = n.parentElement;
       const h = n.offsetHeight || 0;
-      if (h >= 70 && h <= 1500 && n.querySelector('a[href]')) return n;
+      if (h >= 70 && h <= 1500 && n.querySelector('a[href]')) {
+        const foreign = targets.some((t) => t.r.key !== key && t.el !== el && n.contains(t.el));
+        return foreign ? null : n;
+      }
     }
     return null;
   }
@@ -1286,54 +1342,63 @@ function __aibridgeOverlay(rules) {
     return out;
   }
 
+  // Match an id inside link hrefs with a BOUNDARY: "/15934651" must not also light
+  // up "/159346512" (numerically adjacent ids are real on auction sites). The
+  // character after the match must not continue the id.
+  function hrefTargets(v) {
+    let re;
+    try { re = new RegExp(escRe(v) + '(?![A-Za-z0-9])'); } catch (e) { return []; }
+    return Array.prototype.slice.call(document.querySelectorAll('a[href]'))
+      .filter((a) => re.test(a.getAttribute('href') || '')).slice(0, 25);
+  }
+
   function render() {
     if (!document.body) return;
-    ensureStyle();
-    clearAll();
-    for (const r of S.rules) {
-      if (!r || !r.match) continue;
-      let targets = [], after = false;
-      try {
-        if (r.match.text) targets = textTargets(r.match.text);
-        else if (r.match.href) {
-          const v = String(r.match.href);
-          targets = Array.prototype.slice.call(document.querySelectorAll('a[href]'))
-            .filter((a) => (a.getAttribute('href') || '').indexOf(v) >= 0).slice(0, 25);
-          after = true; // never nest the badge inside the link
-        } else if (r.match.selector) {
-          targets = Array.prototype.slice.call(document.querySelectorAll(r.match.selector)).slice(0, 25);
-        } else if (r.match.urlPattern) {
-          if (globRe(r.match.urlPattern).test(location.href)) {
-            // Whole page is this item → fixed banner, top-right.
-            const badge = makeBadge(r);
-            badge.style.cssText = 'all:initial;display:block;position:fixed;top:12px;right:12px;z-index:2147483647';
-            document.body.appendChild(badge);
-            const c = r.cardSelector ? document.querySelector(r.cardSelector) : null;
-            if (c && r.card) {
-              if (r.card.dim) c.classList.add(DIM);
-              if (r.card.strike) c.classList.add(STRIKE);
-              if (r.card.hide) c.classList.add(HIDE);
+    // Never tear down a mark panel the user has open — defer until it closes.
+    for (const p of Array.from(S.panels)) if (!p.host || !p.host.isConnected) S.panels.delete(p);
+    if (S.panels.size) { clearTimeout(S.timer); S.timer = setTimeout(render, 400); return; }
+    S.rendering = true; // our own DOM writes must not re-trigger the observer → render loop
+    try {
+      ensureStyle();
+      clearAll();
+      // Pass 1: find every match first, so card styling can tell when a container
+      // spans MORE than one annotated listing.
+      const targets = []; // { r, el, after }
+      for (const r of S.rules) {
+        if (!r || !r.match) continue;
+        try {
+          if (r.match.text) { for (const el of textTargets(r.match.text)) targets.push({ r, el, after: false }); }
+          else if (r.match.href) { for (const el of hrefTargets(String(r.match.href))) targets.push({ r, el, after: true }); } // never nest the badge inside the link
+          else if (r.match.selector) { for (const el of Array.prototype.slice.call(document.querySelectorAll(r.match.selector)).slice(0, 25)) targets.push({ r, el, after: false }); }
+          else if (r.match.urlPattern) {
+            if (globRe(r.match.urlPattern).test(location.href)) {
+              // Whole page is this item → fixed banner, top-right.
+              const badge = makeBadge(r);
+              badge.style.cssText = 'all:initial;display:block;position:fixed;top:12px;right:12px;z-index:2147483647';
+              document.body.appendChild(badge);
+              const c = r.cardSelector ? document.querySelector(r.cardSelector) : null;
+              if (c && r.card) applyCard(c, r.card);
             }
           }
-          continue;
-        }
-      } catch (e) { continue; }
-
-      for (const el of targets) {
+        } catch (e) { continue; }
+      }
+      // Pass 2: badge + card styling.
+      for (const t of targets) {
+        const r = t.r, el = t.el;
         if (!el || !el.isConnected || el.closest('[' + MARK + ']')) continue;
         try {
           const badge = makeBadge(r);
-          if (after) el.insertAdjacentElement('afterend', badge); else el.appendChild(badge);
+          if (t.after) el.insertAdjacentElement('afterend', badge); else el.appendChild(badge);
           if (r.card) {
-            const c = cardOf(el, r.cardSelector);
-            if (c) {
-              if (r.card.dim) c.classList.add(DIM);
-              if (r.card.strike) c.classList.add(STRIKE);
-              if (r.card.hide) c.classList.add(HIDE);
-            }
+            const c = cardOf(el, r.cardSelector, r.key, targets);
+            if (c) applyCard(c, r.card);
           }
         } catch (e) { /* skip this target */ }
       }
+    } finally {
+      // Mutation records for our writes are delivered at the next microtask
+      // checkpoint — before timers — so resetting on a 0ms timer skips exactly them.
+      setTimeout(() => { S.rendering = false; }, 0);
     }
     report();
   }
@@ -1354,13 +1419,14 @@ function __aibridgeOverlay(rules) {
 
   const schedule = () => { clearTimeout(S.timer); S.timer = setTimeout(render, 160); };
 
-  if (!window.__aibridgeOverlayInstalled) {
-    window.__aibridgeOverlayInstalled = true;
+  if (!window.__bridgeOverlayInstalled) {
+    window.__bridgeOverlayInstalled = true;
     // Re-apply on DOM churn (infinite scroll, lazy lists) and on SPA route changes —
     // there is no webNavigation permission and tabs.onUpdated does not re-inject on
-    // History API URL changes, so the page has to notice for itself.
+    // History API URL changes, so the page has to notice for itself. S.rendering
+    // suppresses the mutations render itself makes (else this loops forever).
     try {
-      new MutationObserver(() => { if (S.rules.length) schedule(); })
+      new MutationObserver(() => { if (!S.rendering && S.rules.length) schedule(); })
         .observe(document.documentElement, { childList: true, subtree: true });
     } catch (e) {}
     for (const m of ['pushState', 'replaceState']) {
@@ -1371,6 +1437,14 @@ function __aibridgeOverlay(rules) {
     }
     addEventListener('popstate', schedule);
     addEventListener('scroll', () => { clearTimeout(S.rtimer); S.rtimer = setTimeout(report, 300); }, true);
+    // Clicking anywhere outside a badge closes any open mark panel. Badge internals
+    // are retargeted to their shadow host (which carries MARK), so they don't match.
+    addEventListener('click', (e) => {
+      if (!S.panels.size) return;
+      const t = e.target;
+      if (t && t.closest && (t.closest('[' + MARK + ']') || t.closest('[' + LEGACY_MARK + ']'))) return;
+      for (const p of Array.from(S.panels)) { try { p.close(); } catch (err) {} }
+    }, true);
   }
 
   render();
@@ -1413,8 +1487,17 @@ async function overlayClear(params) {
   }
   await overlayPush(tabId, rules);
   await overlayStore(tabId, rules);
+  // Keep the seen-report consistent with what remains, so overlay.list doesn't
+  // claim removed keys are still matched until the next in-page scan.
   const seen = await sessGet(OVERLAY_SEEN_KEY);
-  if (!rules.length) { delete seen[String(tabId)]; await sessSet(OVERLAY_SEEN_KEY, seen); }
+  const cur = seen[String(tabId)];
+  if (!rules.length) delete seen[String(tabId)];
+  else if (cur) {
+    const keep = new Set(rules.map((r) => r.key));
+    cur.matched = (cur.matched || []).filter((k) => keep.has(k));
+    cur.visible = (cur.visible || []).filter((k) => keep.has(k));
+  }
+  await sessSet(OVERLAY_SEEN_KEY, seen);
   return { tabId, rules: rules.length, cleared: true };
 }
 

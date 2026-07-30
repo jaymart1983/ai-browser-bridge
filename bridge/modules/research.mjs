@@ -163,8 +163,11 @@ research_list_recordings returns the absolute \`dir\` for each session, so read 
 IMPORTANT: research_read_recording TRUNCATES network bodies to ~300 chars and caps entries by \`limit\`. When you need complete payloads (e.g. to pull every VIN out of a listing API response), read events.jsonl directly and parse the full \`body\` field. Tail it for a live feed.`,
 
   onEnable(ctx) {
+    // Deny-by-default: a fresh enable grants access to NO tabs. The user opts tabs in
+    // at /modules/research (Config) — per-tab toggles, site presets, or "All tabs".
+    // (An existing install keeps whatever the user already chose.)
     const existing = research(ctx).destinations && research(ctx).destinations[DEST];
-    if (!existing) ctx.setDestinationContents('research', DEST, ['*']);
+    if (!existing) ctx.setDestinationContents('research', DEST, []);
   },
 
   tools: {
@@ -238,6 +241,10 @@ IMPORTANT: research_read_recording TRUNCATES network bodies to ~300 chars and ca
         }
         // Plus any marks already written into recordings (survive a bridge restart).
         for (const s of ctx.monitor.listSessions()) {
+          // A session whose last event predates the cursor cannot contain a newer mark —
+          // skip it instead of re-parsing its whole events.jsonl on every poll.
+          const last = Number(s.lastEventAt) || 0;
+          if (since > 0 && last && last <= since) continue;
           let ev = [];
           try { ev = ctx.monitor.readEvents(s.name, s.root, 0).events; } catch { continue; }
           for (const e of ev) {

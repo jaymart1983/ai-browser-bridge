@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle } from './mcp.mjs';
-import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser } from './pairing.mjs';
+import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -96,17 +96,23 @@ function isLoopbackHostHeader(hostHeader) {
   return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
 }
 
-// For the HTTP command endpoint: browsers attach an Origin header on cross-site
-// fetches. We refuse any Origin that is not a loopback http(s) origin. Requests
-// with NO Origin (curl, Node fetch to loopback, native tools) are allowed.
+// Browsers attach an Origin header on cross-site fetches. We refuse any browser
+// origin except the bridge's OWN web UI and the extension. Requests with NO Origin
+// (curl, Node fetch to loopback, native tools) are allowed — local processes are the
+// trust boundary; web pages are not.
+//
+// Deliberately NOT "any loopback origin": a page served by any other local server
+// (localhost:3000 dev servers, docs previews, another app's UI — anything that can
+// render third-party HTML) must not be able to POST /command, /modules/upload, or
+// the config endpoints. Only our own port passes.
 function httpOriginAllowed(origin) {
   if (!origin) return true; // non-browser client
-  // The extension popup/SW is a trusted local client (its own /command calls are
-  // still bearer-gated); allow its origin so it can read /monitor storage stats.
-  if (/^chrome-extension:\/\//i.test(origin) || /^moz-extension:\/\//i.test(origin)) return true;
+  if (/^(chrome|moz|safari-web)-extension:\/\//i.test(origin)) return true;
   try {
     const u = new URL(origin);
-    return u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '[::1]';
+    const loop = u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '[::1]' || u.hostname === '::1';
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    return loop && port === PORT;
   } catch {
     return false;
   }
@@ -255,6 +261,12 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/clients/disconnect') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b && b.id ? disconnectClient(String(b.id)) : { ok: false, error: 'id required' }));
+  }
+  // Ask every connected extension to reload itself (re-reads unpacked source from
+  // disk). Used after a deploy so the user doesn't have to visit chrome://extensions.
+  if (req.method === 'POST' && url.pathname === '/bridge/extension/reload') {
+    broadcastToAgents({ type: 'reload_extension' });
+    return sendJson(res, 200, { ok: true, notified: agentConnected() });
   }
   // Focused-tab actions: enabled modules expose per-tab actions (e.g. Deep Research
   // "Record this tab") that the extension popup renders for the active tab. Loopback
@@ -497,8 +509,11 @@ wss.on('connection', (ws) => {
     // The user acted on an overlay annotation (Pass / Watch / Note). Buffered for the
     // agent to collect — recording NOT required. This is a transient delivery queue,
     // not storage: in memory only, capped, and gone on restart. Nothing is persisted.
+    // The frame must be HMAC-signed with a linked browser's pairing key — a user
+    // decision only the real extension can produce; forged/unsigned frames are dropped.
     if (msg.type === 'overlay_mark') {
-      pushOverlayMark(msg);
+      if (verifyMark(msg)) pushOverlayMark(msg);
+      else log('overlay_mark rejected (missing/invalid signature)');
       return;
     }
     // Agent control frames (hello, etc.) have no id we track.

@@ -206,9 +206,14 @@ function configPage() {
           +btn+'</div>';
       }
       function render(list){
-        if(!list||!list.length){box.innerHTML='<span class="mut">No known AI agents found.</span>';return;}
+        var other = '<div class="card" style="margin-top:6px"><b>Any other MCP agent</b>'
+          +'<div class="mut" style="font-size:12px;margin-top:4px">Point it at <code>http://127.0.0.1:8787/mcp</code> (Streamable HTTP + OAuth 2.1 — registration is automatic). For CLI agents, e.g.:</div>'
+          +'<pre style="font-size:11px;background:var(--bg);border:1px solid var(--line);padding:6px 8px;border-radius:6px;overflow-x:auto;user-select:all;margin:6px 0 4px">claude mcp add --transport http browser-bridge http://127.0.0.1:8787/mcp</pre>'
+          +'<div class="mut" style="font-size:11px">The first connection opens a consent page — approve it in the extension popup (● badge). The grant is permanent until you revoke it here.</div></div>';
+        if(!list||!list.length){box.innerHTML='<span class="mut">No known AI agents detected.</span>'+other;return;}
         box.innerHTML = list.map(tile).join('')
-          +'<div class="mut" style="font-size:12px;margin-top:8px">After connecting: <b>restart that app</b>, then approve the connection in the Browser Bridge <b>extension popup</b> (● badge on the toolbar icon).</div>';
+          +'<div class="mut" style="font-size:12px;margin-top:8px">After connecting: <b>restart that app</b>, then approve the connection in the Browser Bridge <b>extension popup</b> (● badge on the toolbar icon).</div>'
+          +other;
         Array.prototype.forEach.call(box.querySelectorAll('button[data-act]'),function(b){
           b.onclick=async function(){
             var act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
