@@ -18,8 +18,8 @@ import { state } from './state.mjs';
 // cannot become a content-read path.
 export const VERB_TOOLS = {
   read: ['browser_tabs_list', 'browser_read', 'browser_screenshot'],
-  write: ['browser_navigate'],
-  control: ['browser_new_tab', 'browser_close_tab', 'browser_activate_tab', 'browser_eval'],
+  write: ['browser_navigate', 'browser_fill'],
+  control: ['browser_new_tab', 'browser_close_tab', 'browser_activate_tab', 'browser_eval', 'browser_click', 'browser_scroll'],
   record: ['browser_monitor_start', 'browser_monitor_stop', 'browser_monitor_list'],
   annotate: ['browser_annotate', 'browser_annotate_clear', 'browser_annotate_list'],
 };

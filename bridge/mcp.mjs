@@ -68,6 +68,60 @@ const TOOLS = {
     inputSchema: { type: 'object', properties: { tabId: { type: 'number' } }, required: ['tabId'] },
     method: 'page.screenshot',
   },
+  browser_click: {
+    description: [
+      'Click an element in a tab, as if the user clicked it. Target it ONE of two ways:',
+      '  selector — a CSS selector, when you know the exact element.',
+      '  text — the visible label; matches clickable elements (links, buttons, [role=button], submit inputs), preferring an exact label match, then the shortest containing it.',
+      'Scrolls the element into view and fires a full pointer/mouse event sequence plus a native click, so framework handlers fire. Works on background tabs.',
+      'Returns what was clicked and `matches` (how many candidates fit) — if matches > 1, tighten the selector/text and check the result. Prefer this over browser_eval for clicking.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        selector: { type: 'string', description: 'CSS selector of the element to click' },
+        text: { type: 'string', description: 'visible label of the thing to click (used when selector is omitted)' },
+      },
+      required: ['tabId'],
+    },
+    method: 'page.click',
+  },
+  browser_fill: {
+    description: [
+      'Type a value into a form field: input, textarea, select, or contenteditable. Uses the native value setter and fires the input/change events frameworks listen for, so React/Vue/Angular see it as real typing.',
+      'For <select>, `value` may be an option value OR its visible label. `enter: true` presses Enter and submits the enclosing form afterwards.',
+      'REFUSES password/credential fields — the user always signs in themselves. Prefer this over browser_eval for filling fields.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        selector: { type: 'string', description: 'CSS selector of the field' },
+        value: { type: 'string', description: 'the text/option to set' },
+        enter: { type: 'boolean', description: 'press Enter / submit the form after filling (default false)' },
+      },
+      required: ['tabId', 'selector', 'value'],
+    },
+    method: 'page.fill',
+  },
+  browser_scroll: {
+    description: [
+      'Scroll a tab. Pick one: `to` ("top" | "bottom"), `pages` (viewport-heights to scroll; negative scrolls up; 1 ≈ one page-turn), or `selector` (scroll that element into view).',
+      'Returns the new scroll position and `atBottom` — poll pages:1 until atBottom to walk an infinite-scroll listing. Works on background tabs.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        to: { type: 'string', enum: ['top', 'bottom'] },
+        pages: { type: 'number', description: 'viewport-heights to scroll by (default 1; negative = up)' },
+        selector: { type: 'string', description: 'scroll this element into view instead' },
+      },
+      required: ['tabId'],
+    },
+    method: 'page.scroll',
+  },
   browser_monitor_start: {
     capability: 'record',
     description: 'Start recording a tab (network + navigations + screenshots) to a session on disk.',

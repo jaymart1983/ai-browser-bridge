@@ -97,6 +97,9 @@ const CAPABILITIES = [
   'page.fetch',
   'page.exec',
   'page.screenshot',
+  'page.click',
+  'page.fill',
+  'page.scroll',
   'monitor.start',
   'monitor.stop',
   'monitor.list',
@@ -556,6 +559,18 @@ async function handleCommand(cmd) {
         await requireAuth(cmd);
         return { id, result: await doPageScreenshot(params) };
 
+      case 'page.click':
+        await requireAuth(cmd);
+        return { id, result: await doPageClick(params) };
+
+      case 'page.fill':
+        await requireAuth(cmd);
+        return { id, result: await doPageFill(params) };
+
+      case 'page.scroll':
+        await requireAuth(cmd);
+        return { id, result: await doPageScroll(params) };
+
       case 'monitor.start':
         await requireAuth(cmd);
         return { id, result: await monitorStart(params.tabId) };
@@ -831,6 +846,154 @@ async function doPageEval(params) {
     throw new CmdError('EVAL_ERROR', out.error);
   }
   return { tabId, value: out.value };
+}
+
+// ---------------------------------------------------------------------------
+// First-class user-action primitives: click / fill / scroll. Fixed injected
+// functions (ISOLATED world, no eval) so they work on strict-CSP pages, firing
+// the full event sequences frameworks listen for. These exist so agents don't
+// have to hand-write page JS via page.eval for the three most common actions.
+// ---------------------------------------------------------------------------
+
+async function doPageClick(params) {
+  const { tabId, selector, text } = params || {};
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  if (!selector && !text) throw new CmdError('BAD_REQUEST', 'Provide selector (CSS) or text (visible label).');
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel, label) => {
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      let candidates = [];
+      if (sel) {
+        try { candidates = Array.from(document.querySelectorAll(sel)); }
+        catch (e) { return { error: 'bad selector: ' + e.message }; }
+      } else {
+        // Match visible labels on clickable elements: exact match first, then the
+        // shortest label containing the text (avoids grabbing a whole card).
+        const want = String(label).trim().toLowerCase();
+        const scored = [];
+        for (const el of document.querySelectorAll('a[href],button,[role="button"],input[type="submit"],input[type="button"],summary,label,[onclick]')) {
+          // innerText needs layout and can be empty in a never-rendered tab — fall
+          // back to textContent so click-by-text works on background tabs too.
+          const t = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+          if (!t) continue;
+          const lower = t.toLowerCase();
+          if (lower === want) scored.push([0, t.length, el]);
+          else if (lower.includes(want)) scored.push([1, t.length, el]);
+        }
+        scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        candidates = scored.map((s) => s[2]);
+      }
+      const matches = candidates.length;
+      const el = candidates.find(visible) || candidates[0];
+      if (!el) return { error: sel ? 'no element matches that selector' : 'no clickable element with that visible text' };
+      try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { /* non-scrollable */ }
+      const opts = { bubbles: true, cancelable: true, view: window };
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+        try { el.dispatchEvent(type.startsWith('pointer') ? new PointerEvent(type, opts) : new MouseEvent(type, opts)); } catch (e) { /* keep going */ }
+      }
+      try { el.click(); } catch (e) { try { el.dispatchEvent(new MouseEvent('click', opts)); } catch (e2) { /* best effort */ } }
+      return {
+        clicked: true, matches,
+        tag: el.tagName.toLowerCase(),
+        text: (el.innerText || el.value || '').trim().slice(0, 120),
+        href: el.href ? String(el.href).slice(0, 300) : undefined,
+      };
+    },
+    args: [selector || null, text || null],
+  });
+  const out = res && res.result;
+  if (!out) throw new CmdError('INTERNAL', 'No result from page.');
+  if (out.error) throw new CmdError('NOT_FOUND', out.error);
+  return { tabId, ...out };
+}
+
+async function doPageFill(params) {
+  const { tabId, selector, value, enter } = params || {};
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  if (typeof selector !== 'string' || !selector) throw new CmdError('BAD_REQUEST', 'params.selector (CSS string) is required.');
+  if (typeof value !== 'string') throw new CmdError('BAD_REQUEST', 'params.value (string) is required.');
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel, val, pressEnter) => {
+      let el;
+      try { el = document.querySelector(sel); } catch (e) { return { error: 'bad selector: ' + e.message }; }
+      if (!el) return { error: 'no element matches that selector' };
+      // Hard line, enforced here in the extension (not just agent policy): the
+      // bridge never touches credential fields. The user signs in themselves.
+      const itype = (el.type || '').toLowerCase();
+      const ac = (el.getAttribute && el.getAttribute('autocomplete')) || '';
+      if (itype === 'password' || /password|one-time-code/i.test(ac)) {
+        return { error: 'REFUSED: password/credential fields are never filled by the bridge — ask the user to sign in themselves.' };
+      }
+      try { el.focus(); } catch (e) { /* continue unfocused */ }
+      const fire = (t, Ev) => { try { el.dispatchEvent(new (Ev || Event)(t, { bubbles: true })); } catch (e) { /* best effort */ } };
+      if (el.tagName === 'SELECT') {
+        let hit = null;
+        for (const o of el.options) { if (o.value === val || o.text.trim() === val) { hit = o; break; } }
+        if (!hit) {
+          const opts = Array.from(el.options).slice(0, 30).map((o) => o.text.trim()).join(' | ');
+          return { error: 'no <option> with that value or label. Options: ' + opts };
+        }
+        el.value = hit.value;
+        fire('input'); fire('change');
+      } else if (el.isContentEditable) {
+        el.textContent = val;
+        fire('input', InputEvent);
+      } else if ('value' in el) {
+        // Native setter so frameworks (React/Vue) observe the change as real typing.
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const d = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (d && d.set) d.set.call(el, val); else el.value = val;
+        fire('input', InputEvent); fire('change');
+      } else {
+        return { error: 'element is not an input, textarea, select, or contenteditable' };
+      }
+      let submitted = false;
+      if (pressEnter) {
+        const key = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+        try { el.dispatchEvent(new KeyboardEvent('keydown', key)); el.dispatchEvent(new KeyboardEvent('keyup', key)); } catch (e) { /* best effort */ }
+        // A synthetic Enter is untrusted and won't submit a form on its own.
+        const form = el.form || (el.closest && el.closest('form'));
+        if (form) { try { form.requestSubmit(); submitted = true; } catch (e) { try { form.submit(); submitted = true; } catch (e2) { /* no submit */ } } }
+      }
+      return { filled: true, tag: el.tagName.toLowerCase(), name: el.name || el.id || '', length: val.length, submitted };
+    },
+    args: [selector, value, !!enter],
+  });
+  const out = res && res.result;
+  if (!out) throw new CmdError('INTERNAL', 'No result from page.');
+  if (out.error) throw new CmdError(out.error.startsWith('REFUSED') ? 'FORBIDDEN' : 'NOT_FOUND', out.error);
+  return { tabId, ...out };
+}
+
+async function doPageScroll(params) {
+  const { tabId, to, pages, selector } = params || {};
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (t, p, sel) => {
+      if (sel) {
+        let el;
+        try { el = document.querySelector(sel); } catch (e) { return { error: 'bad selector: ' + e.message }; }
+        if (!el) return { error: 'no element matches that selector' };
+        try { el.scrollIntoView({ block: 'center' }); } catch (e) { /* non-scrollable */ }
+      } else if (t === 'top') {
+        window.scrollTo(0, 0);
+      } else if (t === 'bottom') {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      } else {
+        window.scrollBy(0, (Number(p) || 1) * window.innerHeight * 0.9);
+      }
+      const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      return { y: Math.round(window.scrollY), max: Math.round(max), atBottom: window.scrollY >= max - 2 };
+    },
+    args: [to || null, pages == null ? null : Number(pages), selector || null],
+  });
+  const out = res && res.result;
+  if (!out) throw new CmdError('INTERNAL', 'No result from page.');
+  if (out.error) throw new CmdError('NOT_FOUND', out.error);
+  return { tabId, ...out };
 }
 
 // CSP-safe authenticated same-origin fetch. Runs a FIXED injected function
