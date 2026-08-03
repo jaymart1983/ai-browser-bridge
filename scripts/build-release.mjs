@@ -72,7 +72,32 @@ function missingImportsUnder(dir) {
   walk(dir);
   return miss;
 }
-const missing = [...missingImportsUnder(join(STAGE, 'bridge')), ...missingImportsUnder(join(STAGE, 'extension'))];
+// The import scan only sees JS `import`s. Files the EXTENSION MANIFEST references —
+// content scripts, the service worker, the popup, web-accessible resources — are wired
+// by name in JSON, so a new one that isn't git-tracked yet ships as a broken extension
+// with no import to catch it. Check those too.
+function missingManifestRefs(stageExtDir) {
+  const mfPath = join(stageExtDir, 'manifest.json');
+  if (!existsSync(mfPath)) return [];
+  let mf;
+  try { mf = JSON.parse(readFileSync(mfPath, 'utf8')); } catch { return ['extension/manifest.json → unparseable']; }
+  const refs = [];
+  const add = (v) => { if (typeof v === 'string' && v && !/^https?:/.test(v)) refs.push(v); };
+  add(mf.background && mf.background.service_worker);
+  add(mf.action && mf.action.default_popup);
+  add(mf.options_page);
+  for (const cs of mf.content_scripts || []) { for (const f of [...(cs.js || []), ...(cs.css || [])]) add(f); }
+  for (const w of mf.web_accessible_resources || []) { for (const f of (w.resources || [])) if (!String(f).includes('*')) add(f); }
+  for (const v of Object.values((mf.icons) || {})) add(v);
+  for (const v of Object.values((mf.action && mf.action.default_icon) || {})) add(v);
+  return refs.filter((r) => !existsSync(join(stageExtDir, r))).map((r) => `extension/manifest.json → ${r}`);
+}
+
+const missing = [
+  ...missingImportsUnder(join(STAGE, 'bridge')),
+  ...missingImportsUnder(join(STAGE, 'extension')),
+  ...missingManifestRefs(join(STAGE, 'extension')),
+];
 if (missing.length) {
   rmSync(STAGE, { recursive: true, force: true });
   console.error('Release ABORTED — shipped code imports files not present in the build (untracked/uncommitted?):');
