@@ -83,6 +83,35 @@ refused on `tools/call` (an unadvertised tool must not be reachable by guessing 
 name), and the generic core-tool preamble is dropped from the server `instructions`.
 Module tools are never affected. Ignored in standalone mode.
 
+## Status for a host status page
+
+`GET /health` (with the bearer) returns everything a host needs to render its own
+"is the bridge working?" page:
+
+```json
+{
+  "ok": true, "service": "browser-bridge", "version": "0.1.24", "embedded": true,
+  "host": "127.0.0.1", "port": 47830,
+  "url": "http://127.0.0.1:47830", "mcpUrl": "http://127.0.0.1:47830/mcp",
+  "browserConnected": true,
+  "agent": { "name": "AI Analyst", "lastSeen": 1785440000000, "active": true },
+  "modulesEnabled": ["ai-analyst"], "rules": 1, "coreTools": []
+}
+```
+
+`browserConnected` is the extension's socket; `agent.active` is whether an authorized
+`/mcp` call happened in the last 2 minutes. They fail independently — a page that shows
+only one of them will mislead. **A `/health` poll never counts as agent traffic**, so
+`agent.active` means real use, not merely something watching. `coreTools` is `"all"` or
+the effective allowlist (`[]` when `off`).
+
+## The popup in embedded mode
+
+The popup becomes a read-only status panel: bridge reachable, `host:port`, bridge
+version, whether the host's agent is connected, and whether the browser is attached.
+Linking, agent approvals, the control-panel link, module nav and update prompts are all
+hidden — the host application owns that interface.
+
 ## Rule-engine identity
 
 Calls through `/mcp` evaluate with the source name `BRIDGE_EMBEDDED_SOURCE`. Rules are

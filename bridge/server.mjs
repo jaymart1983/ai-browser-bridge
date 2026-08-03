@@ -92,11 +92,45 @@ function embeddedBearerOk(req) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
   return !!(m && timingSafeStr(m[1], EMBEDDED_TOKEN));
 }
+// Last authenticated /mcp call — i.e. the host's agent actually using the bridge.
+// Deliberately only set on the /mcp path, never by a /health status poll, so
+// "agent connected" means real traffic rather than something merely watching.
+let embeddedAgentLastSeen = 0;
+const EMBEDDED_AGENT_IDLE_MS = 2 * 60 * 1000;
+
 // requireToken/wwwAuthenticate for /mcp in embedded mode (replaces OAuth).
 function embeddedRequireToken(authHeader) {
   const m = /^Bearer\s+(.+)$/i.exec(authHeader || '');
   if (!(m && timingSafeStr(m[1], EMBEDDED_TOKEN))) return null;
+  embeddedAgentLastSeen = Date.now();
   return { client_id: 'embedded-host', name: EMBEDDED_SOURCE };
+}
+
+// Everything a host app's own status page (and the slim embedded popup) needs to
+// answer "is this bridge working?" — bearer-gated like the rest of embedded mode.
+function embeddedStatusPayload() {
+  return {
+    ok: true,
+    service: 'browser-bridge',
+    version: BRIDGE_VERSION,
+    embedded: true,
+    host: HOST,
+    port: PORT,
+    url: `http://${HOST}:${PORT}`,
+    mcpUrl: `http://${HOST}:${PORT}/mcp`,
+    // The browser extension's socket.
+    browserConnected: agentConnected(),
+    agentConnected: agentConnected(), // back-compat name
+    // The host's agent (authenticated /mcp traffic).
+    agent: {
+      name: EMBEDDED_SOURCE,
+      lastSeen: embeddedAgentLastSeen || null,
+      active: !!embeddedAgentLastSeen && (Date.now() - embeddedAgentLastSeen) < EMBEDDED_AGENT_IDLE_MS,
+    },
+    modulesEnabled: [...(state.modulesEnabled || [])],
+    rules: (state.rules || []).length,
+    coreTools: CORE_TOOLS_ALLOW ? [...CORE_TOOLS_ALLOW] : 'all',
+  };
 }
 
 // The bridge's own version, read from its package.json. Reported by /health.
@@ -214,7 +248,7 @@ const server = http.createServer((req, res) => {
       return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown path.' } });
     }
     if (p === '/health') {
-      return sendJson(res, 200, { ok: true, service: 'browser-bridge', version: BRIDGE_VERSION, embedded: true, agentConnected: agentConnected() });
+      return sendJson(res, 200, embeddedStatusPayload());
     }
     return void mcpHandle(req, res, url, { relay: relayCommand, requireToken: embeddedRequireToken, wwwAuthenticate: () => 'Bearer', coreTools: CORE_TOOLS_ALLOW });
   }

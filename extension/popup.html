@@ -62,6 +62,19 @@
     </div>
   </div>
 
+  <!-- EMBEDDED MODE: the host application owns the interface, so the popup is a
+       status readout only — bridge reachable, where it is, and whether the host's
+       agent is actually using it. Everything else is hidden. -->
+  <div class="section hidden" id="embeddedSection">
+    <div class="row"><span id="embBridgeDot" class="dot warn"></span>
+      <span id="embBridgeText" class="grow">Bridge…</span></div>
+    <div class="row" style="margin-top:6px"><span id="embAgentDot" class="dot warn"></span>
+      <span id="embAgentText" class="grow">Agent…</span></div>
+    <div class="row" style="margin-top:6px">
+      <span id="embMeta" class="grow muted" style="font-size:11px"></span>
+    </div>
+  </div>
+
   <!-- Focused-tab actions: what enabled modules let you do with the tab in focus -->
   <div class="section hidden" id="tabActionsSection">
     <div class="label" id="tabActionsLabel">This tab</div>

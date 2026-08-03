@@ -28,6 +28,11 @@ async function refresh() {
   $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
   $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
 
+  // EMBEDDED MODE: the host application provides the interface, so this popup is a
+  // status readout and nothing else. Take a separate path rather than hiding pieces
+  // of the standalone UI one by one.
+  if (s.embedded) return renderEmbedded(s);
+
   dashboardUrl = dashUrlFrom(s.bridgeUrl);
   // Embedded mode has no control plane (it 404s by design — the host app owns the
   // UI), so don't offer a button that always lands on "site can't be reached".
@@ -73,6 +78,44 @@ async function refresh() {
   }
 
   if (s.wsConnected) { renderTabActions(); renderAgents(); renderNav(); renderUpdate(); }
+}
+
+// Embedded readout: is the bridge reachable, where is it, and is the host's agent
+// actually using it. No linking, no agent approvals, no control-panel link, no module
+// nav, no update prompt — the host application owns all of that.
+async function renderEmbedded(s) {
+  for (const id of ['tabActionsSection', 'updateSection', 'browsersSection', 'agentsSection', 'navSection']) {
+    const el = $(id); if (el) el.classList.add('hidden');
+  }
+  $('openDash').classList.add('hidden');
+  $('linkBtn').classList.add('hidden');
+  $('embeddedSection').classList.remove('hidden');
+
+  // The status the HOST reports about itself — same host:port its own config page
+  // shows, so the two can't disagree.
+  const st = await send('embeddedStatus').catch(() => null);
+  const reachable = !!(st && st.ok);
+
+  $('embBridgeDot').className = 'dot ' + (reachable ? 'ok' : 'bad');
+  $('embBridgeText').textContent = reachable ? 'Bridge running' : 'Bridge not reachable';
+  $('embBridgeText').title = reachable ? 'The local bridge answered a status request.' : 'The bridge did not answer. Its host application may not be running.';
+
+  const agent = (st && st.agent) || null;
+  const agentName = (agent && agent.name) || 'Agent';
+  // Distinguish "the browser is attached" from "the agent is using it" — they fail
+  // independently and only saying one of them hides the other.
+  const browserOk = !!(st && st.browserConnected) || s.wsConnected;
+  const agentOk = !!(agent && agent.active);
+  $('embAgentDot').className = 'dot ' + (agentOk ? 'ok' : (reachable ? 'warn' : 'bad'));
+  $('embAgentText').textContent = !reachable ? `${agentName} — unknown`
+    : agentOk ? `${agentName} connected`
+    : agent && agent.lastSeen ? `${agentName} idle · last call ${relTime(agent.lastSeen)}`
+      : `${agentName} — no calls yet`;
+  $('embAgentText').title = 'Whether the host application has made an authorized call through the bridge recently.';
+
+  const where = st ? `${st.host}:${st.port}` : '—';
+  $('embMeta').textContent = `${where}${st && st.version ? ' · bridge v' + st.version : ''} · browser ${browserOk ? 'attached' : 'not attached'}`;
+  $('embMeta').title = `The bridge listens on ${where} (loopback only). "browser attached" means this extension's socket is open.`;
 }
 
 // Focused-tab actions: ask the bridge what enabled modules let you do with the tab

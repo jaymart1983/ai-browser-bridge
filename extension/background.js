@@ -1783,6 +1783,19 @@ async function handlePopup(msg) {
       return { ok: true };
     }
 
+    // Embedded mode has no open control plane, so the popup can't use /bridge/status.
+    // The SW holds the launch token, so it fetches the bearer-gated /health here and
+    // hands the popup just what it renders. Null when not embedded/unreachable.
+    case 'embeddedStatus': {
+      const emb = await getEmbedded();
+      if (!emb) return null;
+      const base = emb.bridgeUrl.replace(/^ws/, 'http').replace(/\/agent.*$/, '');
+      try {
+        const r = await fetch(base + '/health', { headers: { authorization: 'Bearer ' + emb.token }, cache: 'no-store' });
+        return r.ok ? await r.json() : null;
+      } catch { return null; }
+    }
+
     case 'moduleDecision': {
       return await submitModuleDecision(msg.reqId, !!msg.approve);
     }
