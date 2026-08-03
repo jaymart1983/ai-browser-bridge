@@ -22,16 +22,17 @@ async function refresh() {
   try { s = await send('getState'); } catch { $('wsText').textContent = 'Service worker unavailable'; return; }
   if (!s) return;
 
-  $('version').textContent = 'extension v' + (s.version || '');
-  $('version').title = 'Extension version. The bridge shows its own version in the control panel.';
   $('runDot').className = 'dot ok';
-  $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
-  $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
 
   // EMBEDDED MODE: the host application provides the interface, so this popup is a
-  // status readout and nothing else. Take a separate path rather than hiding pieces
-  // of the standalone UI one by one.
+  // status readout and nothing else. Branch BEFORE touching any standalone element —
+  // renderEmbedded owns everything it shows (including the version label).
   if (s.embedded) return renderEmbedded(s);
+
+  $('version').textContent = 'extension v' + (s.version || '');
+  $('version').title = 'Extension version. The bridge shows its own version in the control panel.';
+  $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
+  $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
 
   dashboardUrl = dashUrlFrom(s.bridgeUrl);
   // Embedded mode has no control plane (it 404s by design — the host app owns the
@@ -84,38 +85,55 @@ async function refresh() {
 // actually using it. No linking, no agent approvals, no control-panel link, no module
 // nav, no update prompt — the host application owns all of that.
 async function renderEmbedded(s) {
-  for (const id of ['tabActionsSection', 'updateSection', 'browsersSection', 'agentsSection', 'navSection']) {
+  // Hide the ENTIRE standalone status block, not just its buttons: leaving it up
+  // produced a popup that said "Connected to bridge (running)" directly above
+  // "Bridge not reachable". One section owns this readout.
+  for (const id of ['statusSection', 'tabActionsSection', 'updateSection', 'browsersSection', 'agentsSection', 'navSection']) {
     const el = $(id); if (el) el.classList.add('hidden');
   }
-  $('openDash').classList.add('hidden');
-  $('linkBtn').classList.add('hidden');
   $('embeddedSection').classList.remove('hidden');
 
-  // The status the HOST reports about itself — same host:port its own config page
-  // shows, so the two can't disagree.
-  const st = await send('embeddedStatus').catch(() => null);
-  const reachable = !!(st && st.ok);
+  // The socket target is known from the service worker even when the bridge is down,
+  // so the address is ALWAYS accurate — /health only enriches it (version, agent).
+  let where = '—';
+  try { where = new URL(dashUrlFrom(s.bridgeUrl)).host; } catch { /* keep — */ }
 
-  $('embBridgeDot').className = 'dot ' + (reachable ? 'ok' : 'bad');
-  $('embBridgeText').textContent = reachable ? 'Bridge running' : 'Bridge not reachable';
-  $('embBridgeText').title = reachable ? 'The local bridge answered a status request.' : 'The bridge did not answer. Its host application may not be running.';
+  // Accept only a real status payload. An older/mismatched service worker answers an
+  // unknown action with {ok:false,error:…}, which previously rendered as
+  // "undefined:undefined" — treat anything unrecognised as "not reachable".
+  const raw = await send('embeddedStatus').catch(() => null);
+  const st = raw && raw.ok === true && raw.host ? raw : null;
+  const stale = !!(raw && raw.ok === false && /unknown popup action/i.test(String(raw.error || '')));
+  if (st) where = `${st.host}:${st.port}`;
 
-  const agent = (st && st.agent) || null;
+  $('embBridgeDot').className = 'dot ' + (st ? 'ok' : 'bad');
+  $('embBridgeText').textContent = st ? 'Bridge running'
+    : stale ? 'Extension out of date — reload it' : 'Bridge not reachable';
+  $('embBridgeText').title = st ? `The bridge at ${where} answered a status request.`
+    : stale ? 'This extension build is older than the popup it is serving. Reload the extension.'
+      : `No status answer from ${where}. The host application may not be running.`;
+
+  // "the browser is attached" and "the agent is using it" fail independently — saying
+  // only one hides the other.
+  const agent = st && st.agent;
   const agentName = (agent && agent.name) || 'Agent';
-  // Distinguish "the browser is attached" from "the agent is using it" — they fail
-  // independently and only saying one of them hides the other.
-  const browserOk = !!(st && st.browserConnected) || s.wsConnected;
+  const browserOk = st ? !!st.browserConnected : !!s.wsConnected;
   const agentOk = !!(agent && agent.active);
-  $('embAgentDot').className = 'dot ' + (agentOk ? 'ok' : (reachable ? 'warn' : 'bad'));
-  $('embAgentText').textContent = !reachable ? `${agentName} — unknown`
+  $('embAgentDot').className = 'dot ' + (agentOk ? 'ok' : (st ? 'warn' : 'bad'));
+  $('embAgentText').textContent = !st ? `${agentName} — unknown`
     : agentOk ? `${agentName} connected`
-    : agent && agent.lastSeen ? `${agentName} idle · last call ${relTime(agent.lastSeen)}`
+    : agent.lastSeen ? `${agentName} idle · last call ${relTime(agent.lastSeen)}`
       : `${agentName} — no calls yet`;
   $('embAgentText').title = 'Whether the host application has made an authorized call through the bridge recently.';
 
-  const where = st ? `${st.host}:${st.port}` : '—';
-  $('embMeta').textContent = `${where}${st && st.version ? ' · bridge v' + st.version : ''} · browser ${browserOk ? 'attached' : 'not attached'}`;
+  $('embMeta').textContent = `${where} · browser ${browserOk ? 'attached' : 'not attached'}`;
   $('embMeta').title = `The bridge listens on ${where} (loopback only). "browser attached" means this extension's socket is open.`;
+
+  // Report the BRIDGE version here. The extension is bundled by the host application,
+  // so its manifest version is the HOST's version number — showing that under a
+  // "Browser Bridge" heading just misidentifies which component you're looking at.
+  $('version').textContent = st && st.version ? 'bridge v' + st.version : '';
+  $('version').title = 'Bridge version. This extension is bundled by the host application, so its own version tracks that app.';
 }
 
 // Focused-tab actions: ask the bridge what enabled modules let you do with the tab

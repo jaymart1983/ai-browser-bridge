@@ -44,15 +44,18 @@
   .agent button.no{background:var(--bad);border-color:var(--bad);color:#fff}
   .modrow{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
   .modrow .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .hidden{display:none}
+  /* !important so it beats more specific rules (e.g. button.gbtn{display:flex}) —
+     a hidden element must stay hidden regardless of what else styles it. */
+  .hidden{display:none !important}
 </style>
 </head>
 <body>
   <h1><span id="runDot" class="dot warn"></span> Browser Bridge
     <span id="version" class="muted" style="font-size:11px;font-weight:normal"></span></h1>
 
-  <!-- Bridge status + link -->
-  <div class="section">
+  <!-- Bridge status + link (standalone only — embedded replaces this wholesale with
+       #embeddedSection, so the two can never contradict each other) -->
+  <div class="section" id="statusSection">
     <div class="row"><span id="wsDot" class="dot warn"></span>
       <span id="wsText" class="grow">Bridge…</span>
       <button id="openDash" class="gbtn arrow" title="Open the bridge" disabled>↗</button></div>
