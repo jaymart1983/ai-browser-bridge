@@ -68,6 +68,22 @@ if (EMBEDDED) {
   if (EMBEDDED_TOKEN.length < 16) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_TOKEN (>= 16 chars)'); process.exit(1); }
   if (!/^(chrome|moz)-extension:\/\/[a-z0-9-]+$/i.test(EMBEDDED_EXT_ORIGIN)) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_EXT_ORIGIN (e.g. chrome-extension://<id>)'); process.exit(1); }
 }
+// BRIDGE_EMBEDDED_CORE_TOOLS — what an embedded host serves alongside its module's
+// tools: 'all' (default, same as standalone) | 'off' | a comma-separated allowlist
+// (e.g. "browser_tabs_list,browser_read"). A host whose module already declares its
+// full intended surface can withhold the core tools so agents cannot route around a
+// module-level guard via a broader primitive (browser_eval being the sharp one).
+// Returns null for "unrestricted"; a Set otherwise. Never applies standalone.
+const EMBEDDED_CORE_TOOLS = String(process.env.BRIDGE_EMBEDDED_CORE_TOOLS || 'all').trim();
+function coreToolPolicy() {
+  if (!EMBEDDED) return null;
+  const v = EMBEDDED_CORE_TOOLS.toLowerCase();
+  if (!v || v === 'all') return null;
+  if (v === 'off' || v === 'none' || v === '0' || v === 'false') return new Set();
+  return new Set(EMBEDDED_CORE_TOOLS.split(',').map((s) => s.trim()).filter(Boolean));
+}
+const CORE_TOOLS_ALLOW = coreToolPolicy();
+
 function timingSafeStr(a, b) {
   const A = Buffer.from(String(a)), B = Buffer.from(String(b));
   return A.length === B.length && timingSafeEqual(A, B);
@@ -200,7 +216,7 @@ const server = http.createServer((req, res) => {
     if (p === '/health') {
       return sendJson(res, 200, { ok: true, service: 'browser-bridge', version: BRIDGE_VERSION, embedded: true, agentConnected: agentConnected() });
     }
-    return void mcpHandle(req, res, url, { relay: relayCommand, requireToken: embeddedRequireToken, wwwAuthenticate: () => 'Bearer' });
+    return void mcpHandle(req, res, url, { relay: relayCommand, requireToken: embeddedRequireToken, wwwAuthenticate: () => 'Bearer', coreTools: CORE_TOOLS_ALLOW });
   }
 
   if (req.method === 'GET' && url.pathname === '/health') {
@@ -507,11 +523,20 @@ server.on('upgrade', (req, socket, head) => {
   if (EMBEDDED) {
     let token = '';
     try { token = new URL(req.url, `http://${host || '127.0.0.1'}`).searchParams.get('token') || ''; } catch { /* reject below */ }
-    if (origin !== EMBEDDED_EXT_ORIGIN || !timingSafeStr(token, EMBEDDED_TOKEN)) {
+    const originOk = origin === EMBEDDED_EXT_ORIGIN;
+    const tokenOk = timingSafeStr(token, EMBEDDED_TOKEN);
+    if (!originOk || !tokenOk) {
+      // ALWAYS log the refusal. A silent 403 makes an origin/token mismatch
+      // undiagnosable from either side. Name what was presented (never the expected
+      // token) so a host app can see immediately which half is wrong.
+      log('WS upgrade REFUSED (embedded):',
+        originOk ? 'origin ok' : `origin mismatch — presented ${origin || '(none)'}, expected ${EMBEDDED_EXT_ORIGIN}`,
+        tokenOk ? '· token ok' : `· token ${token ? 'mismatch' : 'missing (add ?token=… to the agent URL)'}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
+    log('WS upgrade accepted (embedded) from', origin);
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {

@@ -1753,7 +1753,10 @@ async function handlePopup(msg) {
   switch (msg.action) {
     case 'getState': {
       await ensureOffscreen();
-      const bridgeUrl = await getLocal(K_BRIDGE_URL, DEFAULT_BRIDGE_URL);
+      // The EFFECTIVE url (what the socket actually dials), not the stored one —
+      // in embedded mode they differ and showing the stored one sends people
+      // looking at the wrong port. Strip the token: the popup only displays this.
+      const bridgeUrl = (await effectiveBridgeUrl()).replace(/([?&])token=[^&]*/, '$1token=***');
       const ident = await ensureBrowserIdentity();
       return {
         running: true,

@@ -13,6 +13,7 @@ BRIDGE_EMBEDDED_TOKEN=<random, >= 16 chars>          # per-launch bearer + exten
 BRIDGE_EMBEDDED_EXT_ORIGIN=chrome-extension://<id>   # the ONLY origin allowed to attach
 BRIDGE_EMBEDDED_SOURCE=<name>                        # optional; rule-engine source name
                                                      # for the host's calls (default "Host App")
+BRIDGE_EMBEDDED_CORE_TOOLS=all|off|<allowlist>       # optional; see "Core tools" below
 BRIDGE_PORT=<port>                                   # optional (default 8787)
 BRIDGE_STATE_FILE=<path>                             # optional; honored ONLY in embedded mode
 node bridge/server.mjs
@@ -51,6 +52,36 @@ When that file is present the extension appends `?token=` to the WS upgrade, der
 frame-signing key as `SHA-256(token)` (the bridge derives the same key, so the existing
 per-frame HMAC verification works unchanged), and disables interactive pairing — the
 popup shows "Managed by host application".
+
+The offscreen document (which owns the socket) reads `embedded.json` itself and uses it
+for its **first** dial, so the socket never touches the default port — it does not
+depend on a later `CONFIG` message from the service worker. The popup reports the
+**effective** socket target (token redacted), hides the control-panel button (embedded
+mode has no control plane), and distinguishes *managed/linked* (a key exists) from
+*connected* (the socket is open right now).
+
+A refused WS upgrade is always logged, naming the presented origin and whether the
+token was missing or mismatched (never the expected value), so a misconfigured host
+is diagnosable from the bridge log instead of a silent 403.
+
+## Core tools
+
+By default an embedded bridge serves its modules' tools **and** the core `browser_*`
+tools, exactly like standalone. A host whose module already declares its full intended
+capability surface can withhold them:
+
+```
+BRIDGE_EMBEDDED_CORE_TOOLS=off                              # modules' tools only
+BRIDGE_EMBEDDED_CORE_TOOLS=browser_tabs_list,browser_read   # explicit allowlist
+BRIDGE_EMBEDDED_CORE_TOOLS=all                              # default
+```
+
+This matters when a module enforces a guard in code: a broad primitive like
+`browser_eval` can construct any request itself, so leaving it reachable makes any
+module-level gate advisory. Withheld tools are removed from `tools/list` **and**
+refused on `tools/call` (an unadvertised tool must not be reachable by guessing its
+name), and the generic core-tool preamble is dropped from the server `instructions`.
+Module tools are never affected. Ignored in standalone mode.
 
 ## Rule-engine identity
 

@@ -185,5 +185,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// Kick off the connection as soon as the document loads.
-connect();
+// EMBEDDED MODE: the host application's bridge is NOT on the default port, and this
+// document cannot ask the service worker before it needs the URL. Read embedded.json
+// (an extension resource, so it's fetchable here) and use it as the INITIAL url —
+// otherwise the socket dials the 8787 default on load and, if no CONFIG message ever
+// arrives, stays pointed there forever and the host never sees an agent attach.
+// Falls back to the default when the file is absent (standalone).
+async function initialBridgeUrl() {
+  try {
+    const r = await fetch(chrome.runtime.getURL('embedded.json'));
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.token === 'string' && d.token.length >= 16) {
+        const base = (typeof d.bridgeUrl === 'string' && d.bridgeUrl) ? d.bridgeUrl : DEFAULT_BRIDGE_URL;
+        return base + (base.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(d.token);
+      }
+    }
+  } catch { /* absent → standalone */ }
+  return DEFAULT_BRIDGE_URL;
+}
+
+// Kick off the connection as soon as the document loads (after resolving the URL, so
+// the very first dial goes to the right place).
+initialBridgeUrl().then((u) => { bridgeUrl = u; connect(); }).catch(() => connect());

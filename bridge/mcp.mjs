@@ -18,9 +18,20 @@ What that means:
 - Never enter credentials or payment details, and never submit, bid, buy, or transact. Read, annotate, and report instead.
 - browser_tabs_list only shows tabs you're allowed to read, so it is the right way to discover what you can work with.`;
 
-function buildInstructions() {
+function buildInstructions(ctx) {
   const mods = allInstructions();
-  return [BRIDGE_INSTRUCTIONS, ...mods].join('\n\n');
+  // With the core tools withheld (embedded host serving only its module's surface),
+  // the generic preamble describes tools the agent will never see — so drop it.
+  const preamble = coreToolAllowed(ctx, 'browser_tabs_list') ? [BRIDGE_INSTRUCTIONS] : [];
+  return [...preamble, ...mods].join('\n\n') || BRIDGE_INSTRUCTIONS;
+}
+
+// Core-tool policy. ctx.coreTools is null/undefined for unrestricted (always the case
+// standalone), or a Set allowlist (empty Set = no core tools at all) supplied by an
+// embedded host via BRIDGE_EMBEDDED_CORE_TOOLS. Module tools are never affected.
+function coreToolAllowed(ctx, name) {
+  const allow = ctx && ctx.coreTools;
+  return !allow || allow.has(name);
 }
 
 const PROTOCOL_DEFAULT = '2025-06-18';
@@ -247,7 +258,7 @@ async function dispatch(msg, ctx) {
         // Server-level guidance the client feeds the model on connect, so an agent
         // learns how to drive this bridge without the user pasting a prompt. Enabled
         // modules append their own sections (see allInstructions).
-        instructions: buildInstructions(),
+        instructions: buildInstructions(ctx),
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':
@@ -259,7 +270,9 @@ async function dispatch(msg, ctx) {
       // an enabled module declares that capability — the module also owns the rule
       // objects that allow the verb, so without one the tool is pure noise.
       const caps = activeCapabilities();
-      const core = Object.fromEntries(Object.entries(TOOLS).filter(([, t]) => !t.capability || caps.has(t.capability)));
+      const core = Object.fromEntries(Object.entries(TOOLS)
+        .filter(([, t]) => !t.capability || caps.has(t.capability))
+        .filter(([name]) => coreToolAllowed(ctx, name)));
       const tools = { ...core, ...allModuleTools() };
       return rpcResult(id, { tools: Object.entries(tools).map(([name, t]) => ({ name, description: t.description, inputSchema: t.inputSchema })) });
     }
@@ -269,6 +282,10 @@ async function dispatch(msg, ctx) {
       const core = TOOLS[name];
       const moduleTool = core ? null : allModuleTools()[name];
       if (!core && !moduleTool) return rpcError(id, -32602, `Unknown tool: ${name}`);
+      // An embedded host may restrict/disable the core tool set (its module already
+      // declares the whole intended surface). Enforced on CALL as well as list — a
+      // tool that isn't advertised must not be reachable by guessing its name.
+      if (core && !coreToolAllowed(ctx, name)) return rpcError(id, -32602, `Unknown tool: ${name}`);
       // Enforce the same capability gate on calls that tools/list applies — an agent
       // must not reach a capability no enabled module provides (and whose rules
       // therefore don't exist).

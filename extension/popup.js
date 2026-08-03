@@ -29,8 +29,11 @@ async function refresh() {
   $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
 
   dashboardUrl = dashUrlFrom(s.bridgeUrl);
-  $('openDash').disabled = !s.wsConnected;
-  $('openDash').title = s.wsConnected ? dashboardUrl : 'Bridge not running';
+  // Embedded mode has no control plane (it 404s by design — the host app owns the
+  // UI), so don't offer a button that always lands on "site can't be reached".
+  $('openDash').classList.toggle('hidden', !!s.embedded);
+  $('openDash').disabled = !s.wsConnected || !!s.embedded;
+  $('openDash').title = s.embedded ? 'The host application provides the interface' : (s.wsConnected ? dashboardUrl : 'Bridge not running');
 
   const paired = s.paired === true;
   extPaired = paired;
@@ -40,12 +43,18 @@ async function refresh() {
   try { host = new URL(dashboardUrl).host; } catch {}
   const isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
   const place = isLoopback ? 'this device' : host;
+  // "Linked" is about a stored pairing key; "connected" is about a live socket. They
+  // are independent (you can be linked with the bridge stopped), and conflating them
+  // hides exactly the failure where the socket never attached — so say both.
+  const linkWord = s.embedded ? 'Managed' : 'Linked';
   $('bridgeMeta').textContent = s.pairError ? '⚠ ' + s.pairError
-    : !s.wsConnected ? '○ Local bridge — not running'
-    : paired ? `🔒 Linked · local bridge on ${place} (${host})`
-      : `🖥 Local bridge on ${place} (${host}) — loopback only`;
-  $('bridgeMeta').style.color = s.pairError ? 'var(--bad)' : '';
-  $('bridgeMeta').title = `A helper on your own computer at ${host}. Traffic stays on this device (loopback). Linking pairs this browser to it with a one-time key exchange.`;
+    : !s.wsConnected ? (paired ? `○ ${linkWord}, NOT connected — bridge not reachable at ${host}` : '○ Local bridge — not running')
+    : paired ? `🔒 ${linkWord} · connected · ${host}`
+      : `🖥 Connected · ${host} — not linked yet`;
+  $('bridgeMeta').style.color = s.pairError ? 'var(--bad)' : (paired && !s.wsConnected ? 'var(--warn)' : '');
+  $('bridgeMeta').title = s.embedded
+    ? `Managed by the host application. Socket target: ${host}. "Managed" means keys are provisioned by the host; "connected" means the WebSocket is open right now.`
+    : `A helper on your own computer at ${host}. Traffic stays on this device (loopback). "Linked" means a pairing key is stored; "connected" means the WebSocket is open right now.`;
 
   $('agentsSection').classList.toggle('hidden', !s.wsConnected);
   $('navSection').classList.toggle('hidden', !s.wsConnected);
