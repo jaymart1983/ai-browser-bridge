@@ -37,7 +37,7 @@ import { configureModules, loadModules, setDestinationContents, refreshModuleDes
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
-import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations } from './modules.mjs';
+import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations, moduleDashboardPath } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -1068,7 +1068,7 @@ server.listen(PORT, HOST, () => {
   log(`  tools POST:   http://${HOST}:${PORT}${COMMAND_PATH}`);
   log(`  perm storage: ${MON_ROOTS.perm}`);
   // Optional menubar tray (blue running / green recording). Never fatal.
-  if (!EMBEDDED) startTray({ dashboardUrl: `http://${HOST}:${PORT}/`, onQuit: quitBridge })
+  if (!EMBEDDED) startTray({ dashboardUrl: `http://${HOST}:${PORT}${moduleDashboardPath() || '/'}`, onQuit: quitBridge })
     .then((ok) => log(ok ? 'tray icon started' : 'tray icon unavailable (bridge runs without it)'));
   // Opt-in self-update checker (fetches origin periodically; applies only if enabled).
   if (!EMBEDDED) { try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); } } // embedded: the host owns updates

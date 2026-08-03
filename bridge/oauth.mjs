@@ -20,6 +20,12 @@ const now = () => Date.now();
 
 const ACCESS_TTL_MS = 30 * 24 * 3600 * 1000; // 30 days (refreshable)
 const CODE_TTL_MS = 5 * 60 * 1000;
+// A consent request is something a human must look at, so the queue must stay small
+// and current. Without these, a client that retries authorize in a loop (e.g. because
+// its token exchange never completes) piles up one entry per attempt — observed at 180
+// from a single agent, which buries the real requests and inflates the badge.
+const PENDING_TTL_MS = 10 * 60 * 1000;
+const PENDING_MAX = 20;
 
 // Notify the extension (for the toolbar badge) whenever the pending-request count
 // changes, so an incoming connection surfaces as an icon indicator + popup entry
@@ -302,6 +308,18 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     // which a human must approve. We deliberately do NOT auto-approve just because
     // a grant already exists: a local process that merely learned the client_id
     // would otherwise be able to obtain a token without the user noticing.
+    // Keep the queue to ONE undecided request per client. A fresh authorize supersedes
+    // that client's previous pending request — the old one's PKCE challenge and state
+    // are stale anyway, so it could never be completed. Then drop expired entries and
+    // cap the total, so no client can bury the queue a human is meant to read.
+    for (const [k, q] of pending) if (!q.decided && q.client_id === client.client_id) pending.delete(k);
+    for (const [k, q] of pending) if ((q.created || 0) < now() - PENDING_TTL_MS) pending.delete(k);
+    while (pending.size >= PENDING_MAX) {
+      let oldestKey = null, oldestAt = Infinity;
+      for (const [k, q] of pending) if ((q.created || 0) < oldestAt) { oldestAt = q.created || 0; oldestKey = k; }
+      if (oldestKey == null) break;
+      pending.delete(oldestKey);
+    }
     pending.set(reqId, p);
     console.log('[oauth] authorize', p.client_name, p.client_id, '-> redirect', p.redirect_uri);
     pingPending(); // new request → light up the extension badge

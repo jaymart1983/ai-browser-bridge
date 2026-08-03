@@ -139,6 +139,9 @@ export default {
   // being checked, so `annotate` falls through to this one.
   baseRules: [{ id: 'research-base-v2', source: 'Any Agent', destination: DEST, permissions: ['read', 'write', 'control', 'record', 'annotate'] }],
   navLinks: [{ label: 'Deep Research', href: '/modules/research' }],
+  // The tray's "open dashboard" lands here: the live capture view, which is what
+  // someone clicking the tray while recording actually wants to see.
+  dashboard: '/modules/research?tab=activity',
 
   // Contributed to the MCP server's `instructions` on connect, so an agent learns this
   // workflow without the user pasting a prompt.

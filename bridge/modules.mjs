@@ -312,6 +312,18 @@ export async function invokeTabAction(moduleId, actionId, tabId, url) {
   }
   return { ok: false, error: `no handler for capability "${ta.uses || 'none'}"` };
 }
+// Where the tray's "open dashboard" should land. A module declares `dashboard: '<path>'`
+// to claim it — the live view of what the bridge is doing belongs to whichever module is
+// actually doing something, not to a page the bridge hardcodes. First enabled module
+// that declares one wins; null means fall back to the built-in activity page.
+export function moduleDashboardPath() {
+  for (const id of state.modulesEnabled) {
+    const mod = registry.get(id);
+    if (mod && typeof mod.dashboard === 'string' && mod.dashboard.startsWith('/')) return mod.dashboard;
+  }
+  return null;
+}
+
 export function allNavLinks() {
   const out = [];
   for (const id of state.modulesEnabled) {
