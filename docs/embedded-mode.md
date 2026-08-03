@@ -132,6 +132,19 @@ identifies the tab with the user's attention. `browser_tabs_list` now also carri
 filtered by read permission, so a tab the source may not read is withheld rather than
 leaked.
 
+## Boot self-check
+
+Embedded mode removes the control plane, so any state whose ONLY writer is the UI stays
+empty forever — and every such case presents identically as "the browser/agent can't do
+anything". At boot an embedded bridge logs what it finds:
+
+- a module installed but **not enabled** (there is no UI to enable it — give it
+  `autoEnable: true`)
+- **no** module enabled at all (deny-by-default means every call is refused)
+- an enabled module whose destination has **no patterns** (rules using it deny every
+  target — correct for a module the user opts into via the control plane, but embedded
+  has no such UI, so the module must populate it itself)
+
 ## Rule-engine identity
 
 Calls through `/mcp` evaluate with the source name `BRIDGE_EMBEDDED_SOURCE`. Rules are

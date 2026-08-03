@@ -37,7 +37,7 @@ import { configureModules, loadModules, setDestinationContents, refreshModuleDes
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
-import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls } from './modules.mjs';
+import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -157,6 +157,17 @@ let legacySocket = null; // most-recent socket that hasn't reported a browser id
 function activeSocket() {
   const mapped = state.activeBrowser && agentSockets.get(state.activeBrowser);
   if (mapped && mapped.readyState === mapped.OPEN) return mapped;
+  // EMBEDDED MODE: exactly one browser is possible — BRIDGE_EMBEDDED_EXT_ORIGIN pins a
+  // single extension origin and the upgrade rejects every other — and there is no UI to
+  // choose it with. state.activeBrowser is written only by the control plane (which
+  // embedded removes) and state.browsers only by pairing (which embedded disables), so
+  // the lookup above can never hit: a healthy socket would be unreachable forever.
+  // Route to whichever single agent is connected.
+  if (EMBEDDED) {
+    for (const ws of agentSockets.values()) if (ws.readyState === ws.OPEN) return ws;
+    if (legacySocket && legacySocket.readyState === legacySocket.OPEN) return legacySocket;
+    return null;
+  }
   // Backward-compat: a pre-multi-browser extension connects but never sends a
   // browser id. While a legacy pairing key exists, route to that socket (signed
   // with the legacy key) so it keeps working until the user reloads the extension.
@@ -630,6 +641,13 @@ wss.on('connection', (ws) => {
         adoptLegacyForBrowser(bid, msg.browserName);
         touchBrowser(bid, msg.browserName);
         agentSockets.set(bid, ws);
+        // EMBEDDED MODE: the host ships and pins exactly one extension and removes the
+        // UI that would otherwise select the active browser, so the browser that
+        // connects IS the active one. Set it directly — setActiveBrowser() requires a
+        // state.browsers entry, which only pairing creates and embedded never runs.
+        // Without this the extension is told active:false and the reported state
+        // disagrees with reality even though relaying works.
+        if (EMBEDDED && state.activeBrowser !== bid) { state.activeBrowser = bid; save(); }
         sendToOneAgent(ws, { type: 'active', active: state.activeBrowser === bid, activeBrowser: state.activeBrowser });
       }
       return;
@@ -995,6 +1013,30 @@ const moduleCtx = {
 };
 configureModules(moduleCtx);
 await loadModules();
+
+// EMBEDDED SELF-CHECK. Embedded mode removes the control plane, so any state whose
+// ONLY writer is the UI silently stays empty — and every such case presents
+// identically as "the browser/agent can't do anything". The active-browser selection
+// was one; these are the rest, reported at boot instead of being debugged from
+// outside. Warn only: a host may intend an unusual setup.
+if (EMBEDDED) {
+  try {
+    for (const m of listModules()) {
+      if (!m.enabled) {
+        log(`self-check: module "${m.id}" is installed but NOT enabled. Embedded mode has no UI to enable it — add autoEnable:true to its manifest.`);
+      }
+    }
+    if (!listModules().some((m) => m.enabled)) {
+      log('self-check: no module is enabled, so every tool call will be denied (deny-by-default).');
+    }
+    for (const d of allDestinations()) {
+      if (!d.moduleId) continue; // user-created destinations don't exist without a UI anyway
+      if (!(d.patterns || []).length) {
+        log(`self-check: destination "${d.id}" (module ${d.moduleId}) has no patterns — rules using it DENY every target. That is correct for a deny-by-default module the user opts into via the control plane, but embedded mode has no such UI: if this module is meant to work here, it must populate the destination itself (onEnable/populate).`);
+      }
+    }
+  } catch (e) { log('self-check failed:', e && e.message); }
+}
 
 // ---------------------------------------------------------------------------
 // Boot
