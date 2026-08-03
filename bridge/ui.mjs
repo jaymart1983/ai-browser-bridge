@@ -130,13 +130,18 @@ function configPage() {
       <div>authorized ${esc(fmtWhen(a.created))} · last used ${a.lastUsed ? esc(fmtWhen(a.lastUsed)) : 'never'}</div>
     </td>
     <td><form method=POST action="/config"><input type=hidden name=action value=revoke><input type=hidden name=client_id value="${esc(a.client_id)}"><button class=bad>Revoke</button></form></td></tr>`).join('') : '<tr><td colspan=3 class="mut">No authorized agents.</td></tr>';
-  // Pending requests are shown here but can ONLY be approved from the extension
-  // popup (a signed action from the paired browser). The control panel is served
-  // over unauthenticated loopback, so approving here would let any local process
-  // self-grant — we deliberately don't offer it.
+  // Pending requests can be approved from here, but this PAGE never approves anything
+  // itself: the control panel is unauthenticated loopback, so a POST from it would let
+  // any local process self-grant. The buttons ask the paired EXTENSION to sign the
+  // decision (content script -> service worker -> signed POST). Same proof-of-human as
+  // the popup. Without the extension present the buttons stay disabled and say so.
   const pendRows = pending.map((p) => `<tr><td>⏳ <b>${esc(p.name)}</b> <span class="tag off">pending</span></td>
-    <td class="mut" style="font-size:12px">${p.origin ? `callback ${esc(p.origin)}<br>` : ''}awaiting approval</td>
-    <td class="mut" style="font-size:12px">Approve in the extension popup (● badge)</td></tr>`).join('');
+    <td class="mut" style="font-size:12px">${p.origin ? `callback ${esc(p.origin)}<br>` : ''}awaiting your approval</td>
+    <td><span class="bbdec" data-req="${esc(p.reqId)}">
+      <button class="bbok" disabled>Approve</button>
+      <button class="bbno" disabled>Deny</button>
+      <span class="mut bbmsg" style="font-size:11px;margin-left:6px">extension not detected — use the popup</span>
+    </span></td></tr>`).join('');
   const stale = listStale();
   const staleRows = stale.map((s) => `<tr>
     <td><span class="mut">${esc(s.name)}</span> <span class="tag">stale</span></td>
@@ -183,6 +188,43 @@ function configPage() {
       <span class="grow">Permanent <b>${fmtBytes(usage.perm)}</b></span>
       <form method=POST action="/config"><input type=hidden name=action value=clear><input type=hidden name=root value=perm><button>Clear Perm</button></form>
     </div></div>
+
+    <script>
+    (function(){
+      // Approve/Deny here are relayed to the paired extension, which signs them — this
+      // page cannot (and must not be able to) approve on its own. See bridge-page.js.
+      var present = false;
+      window.addEventListener('message', function(ev){
+        if (ev.source !== window || ev.origin !== location.origin) return;
+        var m = ev.data; if (!m || m.source !== 'bb-ext') return;
+        if (m.type === 'present') { present = true; enable(); return; }
+        if (m.type === 'decision-result') {
+          var box = document.querySelector('.bbdec[data-req="' + m.reqId + '"]');
+          if (!box) return;
+          var r = m.result || {};
+          if (r.ok === false) { box.querySelector('.bbmsg').textContent = '⚠ ' + (r.error || 'failed');
+            box.querySelector('.bbok').disabled = false; box.querySelector('.bbno').disabled = false; }
+          else { box.querySelector('.bbmsg').textContent = 'done'; setTimeout(function(){ location.reload(); }, 600); }
+        }
+      });
+      function enable(){
+        document.querySelectorAll('.bbdec').forEach(function(box){
+          var msg = box.querySelector('.bbmsg'); msg.textContent = '';
+          [['.bbok', true], ['.bbno', false]].forEach(function(pair){
+            var b = box.querySelector(pair[0]); b.disabled = false;
+            b.onclick = function(){
+              box.querySelector('.bbok').disabled = true; box.querySelector('.bbno').disabled = true;
+              msg.textContent = pair[1] ? 'approving…' : 'denying…';
+              window.postMessage({ source:'bb-page', type:'decision', kind:'oauth', reqId: box.getAttribute('data-req'), approve: pair[1] }, location.origin);
+            };
+          });
+        });
+      }
+      // The content script announces itself on load; ask again in case we loaded first.
+      window.postMessage({ source:'bb-page', type:'ping' }, location.origin);
+      setTimeout(function(){ if (!present) window.postMessage({ source:'bb-page', type:'ping' }, location.origin); }, 500);
+    })();
+    </script>
 
     <h2>Connect AI agents <span class="mut" style="font-size:12px;font-weight:400">write the bridge into each app's MCP config for you</span></h2>
     <div class="card"><div id="cliBox" class="mut">Detecting…</div></div>

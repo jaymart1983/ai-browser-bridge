@@ -489,6 +489,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async response
   }
 
+  // A decision relayed from the bridge's own control panel (see bridge-page.js). The
+  // page cannot sign — the pairing key never leaves this service worker — so it asks
+  // us to. The security property is preserved by checking sender.origin, which the
+  // page cannot forge: only the CONFIGURED bridge origin may use this relay, so
+  // another local server can't borrow it to approve itself.
+  if (msg.type === 'PAGE_DECISION') {
+    (async () => {
+      try {
+        const bridgeHttpOrigin = new URL((await effectiveBridgeUrl()).replace(/^ws/, 'http')).origin;
+        if (!sender || sender.origin !== bridgeHttpOrigin) {
+          return sendResponse({ ok: false, error: 'Only the bridge control panel may approve from a page.' });
+        }
+        const fn = msg.kind === 'module' ? submitModuleDecision : submitOauthDecision;
+        sendResponse(await fn(String(msg.reqId || ''), !!msg.approve));
+      } catch (e) {
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true; // async
+  }
+
   // Popup <-> SW control messages.
   if (msg.type === 'POPUP') {
     handlePopup(msg)

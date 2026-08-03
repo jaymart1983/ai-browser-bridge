@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Bridge",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "Pairs your browser with a local bridge so AI/MCP agents can drive it under rules you control. Loopback only - nothing leaves your device.",
   "permissions": [
     "tabs",
@@ -35,5 +35,18 @@
       "128": "icons/icon128.png"
     }
   },
-  "minimum_chrome_version": "116"
+  "minimum_chrome_version": "116",
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "bridge-page.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
 }
