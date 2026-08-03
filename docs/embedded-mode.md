@@ -71,17 +71,23 @@ tools, exactly like standalone. A host whose module already declares its full in
 capability surface can withhold them:
 
 ```
+BRIDGE_EMBEDDED_CORE_TOOLS=all                              # default — everything
+BRIDGE_EMBEDDED_CORE_TOOLS=all,-browser_eval                # everything EXCEPT these
+BRIDGE_EMBEDDED_CORE_TOOLS=browser_focused_tab,browser_read # explicit allowlist
 BRIDGE_EMBEDDED_CORE_TOOLS=off                              # modules' tools only
-BRIDGE_EMBEDDED_CORE_TOOLS=browser_tabs_list,browser_read   # explicit allowlist
-BRIDGE_EMBEDDED_CORE_TOOLS=all                              # default
 ```
 
-This matters when a module enforces a guard in code: a broad primitive like
-`browser_eval` can construct any request itself, so leaving it reachable makes any
-module-level gate advisory. Withheld tools are removed from `tools/list` **and**
-refused on `tools/call` (an unadvertised tool must not be reachable by guessing its
-name), and the generic core-tool preamble is dropped from the server `instructions`.
-Module tools are never affected. Ignored in standalone mode.
+**The exclusion form is usually the right one.** A host that enforces a guard in code
+needs to drop `browser_eval` specifically — a broad primitive can construct any request
+itself, so leaving it reachable makes a module-level gate advisory — while keeping the
+rest of the capability surface (reads, clicks, navigation, annotation, recording).
+`off` is a blunt instrument: it also removes tab enumeration and the focused-tab query,
+which a host then has to reimplement in its module.
+
+Withheld tools are removed from `tools/list` **and** refused on `tools/call` (an
+unadvertised tool must not be reachable by guessing its name), and the generic core-tool
+preamble is dropped from the server `instructions`. Module tools are never affected.
+Ignored in standalone mode.
 
 ## Status for a host status page
 
@@ -111,6 +117,20 @@ The popup becomes a read-only status panel: bridge reachable, `host:port`, bridg
 version, whether the host's agent is connected, and whether the browser is attached.
 Linking, agent approvals, the control-panel link, module nav and update prompts are all
 hidden — the host application owns that interface.
+
+This is a change to what the **end user is shown**, not to what agents can do. An
+embedded host keeps the full capability surface unless it opts out via
+`BRIDGE_EMBEDDED_CORE_TOOLS`.
+
+## Which tab is the user looking at
+
+`browser_focused_tab` returns the active tab of the **focused window** — at most one.
+Prefer it over scanning `browser_tabs_list` for `active: true`: `active` is per window,
+so with several windows open multiple tabs report `active: true` and none of them
+identifies the tab with the user's attention. `browser_tabs_list` now also carries
+`windowId` and `focused` per tab. Both are `read`-verb tools and their results are
+filtered by read permission, so a tab the source may not read is withheld rather than
+leaked.
 
 ## Rule-engine identity
 

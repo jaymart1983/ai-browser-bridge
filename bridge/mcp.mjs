@@ -44,6 +44,17 @@ const TOOLS = {
     inputSchema: { type: 'object', properties: {} },
     method: 'tabs.list',
   },
+  browser_focused_tab: {
+    description: [
+      "The ONE tab the user is actually looking at right now — the active tab of the focused window. Use this when you need 'the current page' (annotate it, read it, screenshot it).",
+      '',
+      "Prefer this over scanning browser_tabs_list for active:true — `active` is per WINDOW, so with several windows open multiple tabs report active:true and you cannot tell which one has the user's attention.",
+      '',
+      'Returns { tab: { tabId, url, title, favIconUrl, windowId, focused } } or { tab: null } when the focused tab is not one you may read (or no window is focused).',
+    ].join('\n'),
+    inputSchema: { type: 'object', properties: {} },
+    method: 'tab.focused',
+  },
   browser_new_tab: {
     description: 'Open a new browser tab, optionally at a URL. Returns the new tabId.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, active: { type: 'boolean', description: 'focus the new tab (default false)' } } },
@@ -228,6 +239,10 @@ const TOOLS = {
   },
 };
 
+// Every core tool name — so a host can express its policy as "all except X" rather
+// than having to enumerate (and keep up with) the full set.
+export function coreToolNames() { return Object.keys(TOOLS); }
+
 function readBody(req) {
   return new Promise((resolve) => {
     let b = '', n = 0;
@@ -337,8 +352,15 @@ async function dispatch(msg, ctx) {
         if (name === 'browser_tabs_list' && Array.isArray(result)) {
           const allowed = result
             .filter((t) => evaluate(ctx.sourceName, t.url || '', 'browser_read').allow)
-            .map((t) => ({ tabId: t.tabId, url: t.url, title: t.title, favIconUrl: t.favIconUrl, active: t.active }));
+            .map((t) => ({ tabId: t.tabId, url: t.url, title: t.title, favIconUrl: t.favIconUrl, active: t.active, windowId: t.windowId, focused: t.focused }));
           return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify(allowed, null, 2) }] });
+        }
+        // browser_focused_tab → same read filter; withhold the tab rather than leaking
+        // the URL/title of a page this source isn't allowed to see.
+        if (name === 'browser_focused_tab') {
+          const t = result && result.tab;
+          const visible = t && evaluate(ctx.sourceName, t.url || '', 'browser_read').allow;
+          return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify({ tab: visible ? t : null }, null, 2) }] });
         }
         // Screenshot → image content; everything else → JSON text.
         if (name === 'browser_screenshot' && result && typeof result.dataUrl === 'string') {

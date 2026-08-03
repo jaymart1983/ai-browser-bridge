@@ -30,7 +30,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
-import { mcpHandle } from './mcp.mjs';
+import { mcpHandle, coreToolNames } from './mcp.mjs';
 import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
@@ -68,19 +68,30 @@ if (EMBEDDED) {
   if (EMBEDDED_TOKEN.length < 16) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_TOKEN (>= 16 chars)'); process.exit(1); }
   if (!/^(chrome|moz)-extension:\/\/[a-z0-9-]+$/i.test(EMBEDDED_EXT_ORIGIN)) { console.error('[bridge] BRIDGE_EMBEDDED=1 requires BRIDGE_EMBEDDED_EXT_ORIGIN (e.g. chrome-extension://<id>)'); process.exit(1); }
 }
-// BRIDGE_EMBEDDED_CORE_TOOLS — what an embedded host serves alongside its module's
-// tools: 'all' (default, same as standalone) | 'off' | a comma-separated allowlist
-// (e.g. "browser_tabs_list,browser_read"). A host whose module already declares its
-// full intended surface can withhold the core tools so agents cannot route around a
-// module-level guard via a broader primitive (browser_eval being the sharp one).
-// Returns null for "unrestricted"; a Set otherwise. Never applies standalone.
+// BRIDGE_EMBEDDED_CORE_TOOLS — which core tools an embedded host serves alongside its
+// module's tools. Accepts:
+//   all                            everything (default, same as standalone)
+//   off                            nothing — the module's tools only
+//   all,-browser_eval              everything EXCEPT the listed tools
+//   browser_read,browser_screenshot  an explicit allowlist
+// The exclusion form is usually what a host wants: keep the full capability surface
+// but drop one sharp primitive (browser_eval can construct any request itself, which
+// makes a module-level guard advisory). Returns null = unrestricted; a Set otherwise.
+// Never applies standalone.
 const EMBEDDED_CORE_TOOLS = String(process.env.BRIDGE_EMBEDDED_CORE_TOOLS || 'all').trim();
 function coreToolPolicy() {
   if (!EMBEDDED) return null;
   const v = EMBEDDED_CORE_TOOLS.toLowerCase();
   if (!v || v === 'all') return null;
   if (v === 'off' || v === 'none' || v === '0' || v === 'false') return new Set();
-  return new Set(EMBEDDED_CORE_TOOLS.split(',').map((s) => s.trim()).filter(Boolean));
+  const parts = EMBEDDED_CORE_TOOLS.split(',').map((s) => s.trim()).filter(Boolean);
+  const drop = parts.filter((p) => p.startsWith('-') || p.startsWith('!')).map((p) => p.slice(1).trim());
+  const keep = parts.filter((p) => !p.startsWith('-') && !p.startsWith('!'));
+  // No explicit includes (or an explicit "all") means "start from the full set".
+  const base = (!keep.length || keep.some((k) => k.toLowerCase() === 'all')) ? coreToolNames() : keep;
+  const set = new Set(base);
+  for (const d of drop) set.delete(d);
+  return set;
 }
 const CORE_TOOLS_ALLOW = coreToolPolicy();
 

@@ -17,7 +17,7 @@ import { state } from './state.mjs';
 // The annotate tools never return page-derived content — see mcp.mjs — so this verb
 // cannot become a content-read path.
 export const VERB_TOOLS = {
-  read: ['browser_tabs_list', 'browser_read', 'browser_screenshot'],
+  read: ['browser_tabs_list', 'browser_focused_tab', 'browser_read', 'browser_screenshot'],
   write: ['browser_navigate', 'browser_fill'],
   control: ['browser_new_tab', 'browser_close_tab', 'browser_activate_tab', 'browser_eval', 'browser_click', 'browser_scroll'],
   record: ['browser_monitor_start', 'browser_monitor_stop', 'browser_monitor_list'],
@@ -28,7 +28,9 @@ const TOOL_VERB = {};
 for (const [verb, tools] of Object.entries(VERB_TOOLS)) for (const t of tools) TOOL_VERB[t] = verb;
 
 // Tools that act across/without a single URL target — gated by the verb alone.
-const NON_TARGETED = new Set(['browser_tabs_list', 'browser_monitor_list', 'browser_monitor_stop']);
+// browser_focused_tab is non-targeted for the same reason as browser_tabs_list: the
+// call itself has no URL, and its RESULT is filtered by read permission in mcp.mjs.
+const NON_TARGETED = new Set(['browser_tabs_list', 'browser_focused_tab', 'browser_monitor_list', 'browser_monitor_stop']);
 
 export function toolVerb(toolName) { return TOOL_VERB[toolName] || null; }
 

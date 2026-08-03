@@ -88,6 +88,7 @@ async function ensureBrowserIdentity() {
 const CAPABILITIES = [
   'status',
   'tabs.list',
+  'tab.focused',
   'tab.navigate',
   'tab.create',
   'tab.activate',
@@ -534,6 +535,10 @@ async function handleCommand(cmd) {
         await requireAuth(cmd);
         return { id, result: await doTabClose(params) };
 
+      case 'tab.focused':
+        await requireAuth(cmd);
+        return { id, result: await doTabFocused() };
+
       case 'page.read':
         await requireAuth(cmd);
         return { id, result: await doPageRead(params) };
@@ -790,15 +795,42 @@ async function doStatus() {
 }
 
 // Raw tab facts only — policy (allow/storage) is bridge-owned now.
+// `active` is per WINDOW — with several windows open, several tabs are "active" at
+// once, so it cannot answer "which tab is the user actually looking at". `focused`
+// is the active tab of the focused window: at most one, and the one that matters for
+// annotate/screenshot/read-what-I'm-seeing.
+async function focusedWindowId() {
+  try { const w = await chrome.windows.getLastFocused(); return w && w.id; } catch { return undefined; }
+}
+
 async function doTabsList() {
-  const tabs = await chrome.tabs.query({});
+  const [tabs, focusedWin] = await Promise.all([chrome.tabs.query({}), focusedWindowId()]);
   return tabs.map((t) => ({
     tabId: t.id,
     url: t.url || t.pendingUrl || '',
     title: t.title || '',
     favIconUrl: t.favIconUrl || '',
     active: !!t.active,
+    windowId: t.windowId,
+    focused: !!t.active && t.windowId === focusedWin,
   }));
+}
+
+async function doTabFocused() {
+  let t = null;
+  try { [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }); } catch { /* fall through */ }
+  if (!t) return { tab: null };
+  return {
+    tab: {
+      tabId: t.id,
+      url: t.url || t.pendingUrl || '',
+      title: t.title || '',
+      favIconUrl: t.favIconUrl || '',
+      active: !!t.active,
+      windowId: t.windowId,
+      focused: true,
+    },
+  };
 }
 
 async function doTabNavigate(params) {
