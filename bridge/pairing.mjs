@@ -62,7 +62,11 @@ export function setActiveBrowser(browserId) {
 
 export function touchBrowser(browserId, name) {
   const b = state.browsers[browserId];
-  if (b) { b.lastSeen = Date.now(); if (name) b.name = name; save(); return true; }
+  // NEVER let the extension's auto-detected name overwrite one the user chose. The
+  // extension reports its UA-derived guess ("Chrome") on every reconnect, so without
+  // this a rename silently reverts the next time the browser attaches — which is the
+  // whole point of renaming when two Chromium forks both report "Chrome".
+  if (b) { b.lastSeen = Date.now(); if (name && !b.renamed) b.name = name; save(); return true; }
   return false;
 }
 
@@ -74,7 +78,9 @@ export function renameBrowser(browserId, name) {
   if (!b) return { ok: false, error: 'unknown browser' };
   const clean = String(name || '').trim().slice(0, 40);
   if (!clean) return { ok: false, error: 'name required' };
-  b.name = clean; save();
+  // `renamed` marks this as the USER's choice, so reconnects stop re-applying the
+  // browser's own guess (see touchBrowser).
+  b.name = clean; b.renamed = true; save();
   return { ok: true, name: clean };
 }
 
@@ -101,7 +107,9 @@ export function pairInit(extPubHex, browserId, name) {
   const key = createHash('sha256').update(shared).digest('hex');
   if (browserId) {
     const prev = state.browsers[browserId];
-    state.browsers[browserId] = { id: browserId, name: name || (prev && prev.name) || 'Browser', key, created: (prev && prev.created) || Date.now(), lastSeen: Date.now() };
+    // Re-linking must not discard a user-chosen label either.
+    const keepName = prev && prev.renamed ? prev.name : (name || (prev && prev.name) || 'Browser');
+    state.browsers[browserId] = { id: browserId, name: keepName, renamed: !!(prev && prev.renamed), key, created: (prev && prev.created) || Date.now(), lastSeen: Date.now() };
     if (!state.activeBrowser) state.activeBrowser = browserId;
   } else {
     state.pairing = { key, paired: true, created: Date.now() };

@@ -17,6 +17,18 @@ function dashUrlFrom(ws) {
 }
 const bridgeBase = () => dashboardUrl.replace(/\/$/, '');
 
+// The popup polls every 2.5s, and each section used to clear and rebuild its DOM on
+// every tick — which reads as a visible flash even when nothing changed. Sections now
+// re-render only when their data actually differs from the last paint. Returns true
+// when the caller should redraw.
+const _sigs = {};
+function changed(key, value) {
+  const sig = JSON.stringify(value);
+  if (_sigs[key] === sig) return false;
+  _sigs[key] = sig;
+  return true;
+}
+
 async function refresh() {
   let s;
   try { s = await send('getState'); } catch { $('wsText').textContent = 'Service worker unavailable'; return; }
@@ -150,6 +162,8 @@ async function renderTabActions() {
   catch { sec.classList.add('hidden'); return; }
   if (!actions.length) { sec.classList.add('hidden'); return; }
   let host = tab.url; try { host = new URL(tab.url).host; } catch {}
+  sec.classList.remove('hidden');
+  if (!changed('tabActions', { host, actions })) return; // nothing to repaint
   $('tabActionsLabel').textContent = 'This tab · ' + host;
   const box = $('tabActionsList');
   box.innerHTML = '';
@@ -215,7 +229,7 @@ async function renderAgents() {
   // marked "(this browser)". Names come from the bridge, so renames appear here.
   const browsers = data.browsers || [];
   const bSec = $('browsersSection'), bList = $('browserList');
-  if (bSec && bList) {
+  if (bSec && bList && changed('browsers', { paired: bridgePaired, browsers, me: myBrowserId })) {
     bSec.classList.toggle('hidden', !(bridgePaired && browsers.length));
     bList.innerHTML = '';
     for (const b of browsers) {
@@ -247,12 +261,15 @@ async function renderAgents() {
     }
   }
 
-  const box = $('agentList');
-  box.innerHTML = '';
   const pend = data.pending || [];
   const pendMods = data.pendingModules || [];
   const agents = data.agents || [];
   const stale = data.stale || [];
+  // `lastUsed` ticks constantly and only drives a relative-time label, so exclude it
+  // from the signature — otherwise the list would repaint (and flash) every poll.
+  if (!changed('agents', { pend, pendMods, stale, agents: agents.map((a) => ({ ...a, lastUsed: undefined })) })) return;
+  const box = $('agentList');
+  box.innerHTML = '';
   if (!pend.length && !pendMods.length && !agents.length && !stale.length) { box.innerHTML = '<div class="muted" style="font-size:11px;padding:4px 0">No agents yet. Add this bridge in your AI client, then approve it here.</div>'; return; }
   // Both pending kinds route through the service worker, which SIGNS the decision
   // with the pairing key (the bridge rejects any unsigned approval — no
@@ -328,9 +345,10 @@ async function renderNav() {
   let data;
   try { data = await (await fetch(bridgeBase() + '/bridge/nav', { cache: 'no-store' })).json(); } catch { return; }
   const mods = data.modules || [];
+  $('navSection').classList.toggle('hidden', mods.length === 0);
+  if (!changed('nav', mods)) return;
   const box = $('navLinks');
   box.innerHTML = '';
-  $('navSection').classList.toggle('hidden', mods.length === 0);
   for (const l of mods) {
     const row = document.createElement('div'); row.className = 'modrow';
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = l.label;

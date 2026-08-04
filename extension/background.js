@@ -57,12 +57,24 @@ const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge /
 function detectBrowserName() {
   try {
     const ua = (self.navigator && navigator.userAgent) || '';
+    // Chromium forks (Island, Arc, enterprise builds) often keep a VANILLA Chrome user
+    // agent on purpose — sites break otherwise — so the UA can't tell them apart. The
+    // UA-CH brand list is where a fork actually names itself, so check it FIRST and
+    // ignore the entries every Chromium reports (plus the deliberate GREASE junk).
+    const brands = (self.navigator && navigator.userAgentData && navigator.userAgentData.brands) || [];
+    const generic = /^(chromium|google chrome|microsoft edge|not[.\/ ]?a[.\/ ]?brand|not-a\.brand|not_a brand)$/i;
+    for (const b of brands) {
+      const n = String((b && b.brand) || '').trim();
+      if (n && !generic.test(n) && !/^not/i.test(n)) return n;
+    }
     if (self.navigator && navigator.brave) return 'Brave';
     if (/\bEdg(A|iOS)?\//.test(ua)) return 'Edge';
     if (/\bOPR\/|\bOpera\//.test(ua)) return 'Opera';
     if (/\bVivaldi/.test(ua)) return 'Vivaldi';
     if (/\bYaBrowser\//.test(ua)) return 'Yandex';
-    if (/\bIsland\//i.test(ua)) return 'Island';
+    // Island appends a token like "island_browser_<org>" rather than "Island/…", so
+    // match the family, not a version-style slash.
+    if (/\bisland[_\/ -]/i.test(ua)) return 'Island';
     if (/\bDuckDuckGo\//i.test(ua)) return 'DuckDuckGo';
     if (/\bArc\//.test(ua)) return 'Arc';
     if (/\bHeadlessChrome\//.test(ua)) return 'Chrome (headless)';
@@ -79,7 +91,16 @@ async function ensureBrowserIdentity() {
     const rnd = (self.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, '') : (Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36));
     patch[K_BROWSER_ID] = 'br_' + rnd.slice(0, 16);
   }
-  if (typeof cur[K_BROWSER_NAME] !== 'string' || !cur[K_BROWSER_NAME]) patch[K_BROWSER_NAME] = detectBrowserName();
+  const storedName = cur[K_BROWSER_NAME];
+  if (typeof storedName !== 'string' || !storedName) patch[K_BROWSER_NAME] = detectBrowserName();
+  else if (/^(chrome|chromium|browser)$/i.test(storedName)) {
+    // Upgrade a generic name detected by an older build: this install may be a fork
+    // that only identifies itself through the UA-CH brand list. Safe to re-detect —
+    // this is the browser's own guess, and the bridge ignores it once the user has
+    // renamed the browser there.
+    const better = detectBrowserName();
+    if (better && !/^(chrome|chromium|browser)$/i.test(better)) patch[K_BROWSER_NAME] = better;
+  }
   if (Object.keys(patch).length) await setLocal(patch);
   return { id: patch[K_BROWSER_ID] || cur[K_BROWSER_ID], name: patch[K_BROWSER_NAME] || cur[K_BROWSER_NAME] };
 }
