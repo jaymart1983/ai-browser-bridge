@@ -308,6 +308,14 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     // which a human must approve. We deliberately do NOT auto-approve just because
     // a grant already exists: a local process that merely learned the client_id
     // would otherwise be able to obtain a token without the user noticing.
+    // A code that was issued and never exchanged is the signature of a broken client
+    // callback — the commonest cause of an agent that re-authorizes forever, and
+    // otherwise completely silent. Name it, with the redirect_uri to check.
+    for (const [c, rec] of codes) {
+      if (rec.exp >= now()) continue;
+      codes.delete(c);
+      console.log(`[oauth] code for "${rec.name}" expired UNEXCHANGED — it was approved but never called /oauth/token. Its redirect_uri (${rec.redirect_uri}) must be reachable and must accept the ?code=… redirect.`);
+    }
     // Keep the queue to ONE undecided request per client. A fresh authorize supersedes
     // that client's previous pending request — the old one's PKCE challenge and state
     // are stale anyway, so it could never be completed. Then drop expired entries and
