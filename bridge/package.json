@@ -1,6 +1,6 @@
 {
   "name": "browser-bridge",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "description": "Local bridge that relays commands from AI/CLI tools to the Browser Bridge extension over a loopback WebSocket.",
   "type": "module",
   "private": true,
@@ -9,13 +9,14 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "cli": "node cli.mjs"
+    "cli": "node cli.mjs",
+    "preflight": "node ../scripts/preflight.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "systray2": "^2.1.4",
-    "ws": "^8.18.0"
+    "ws": "^8.21.2"
   }
 }

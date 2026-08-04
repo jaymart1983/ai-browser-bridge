@@ -48,6 +48,10 @@ const K_PAIR_EPHEMERAL = 'pairEphemeralJwk'; // in-flight ECDH private key, so t
 const K_BRIDGE_URL = 'bridgeUrl'; // string
 const K_BROWSER_ID = 'browserId'; // stable per-install id so the bridge can tell browsers apart
 const K_BROWSER_NAME = 'browserName'; // friendly label (Chrome / Brave / Edge / …)
+// The raw evidence behind that label, surfaced in the control panel so a user can tell
+// two look-alike Chromium browsers apart (and see WHY one was auto-named as it was).
+const K_BROWSER_UA = 'browserUa';
+const K_BROWSER_BRANDS = 'browserBrands';
 
 // Best-effort browser name for the linked-browsers list in the bridge. Specific
 // Chromium forks are matched before the generic "Chrome" fallback. NOTE: some forks
@@ -85,7 +89,7 @@ function detectBrowserName() {
 }
 // Ensure this install has a stable id + name (used to identify it to the bridge).
 async function ensureBrowserIdentity() {
-  const cur = await chrome.storage.local.get([K_BROWSER_ID, K_BROWSER_NAME]);
+  const cur = await chrome.storage.local.get([K_BROWSER_ID, K_BROWSER_NAME, K_BROWSER_UA, K_BROWSER_BRANDS]);
   const patch = {};
   if (typeof cur[K_BROWSER_ID] !== 'string' || !cur[K_BROWSER_ID]) {
     const rnd = (self.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, '') : (Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36));
@@ -101,8 +105,20 @@ async function ensureBrowserIdentity() {
     const better = detectBrowserName();
     if (better && !/^(chrome|chromium|browser)$/i.test(better)) patch[K_BROWSER_NAME] = better;
   }
+  // Refresh the raw signals every time — a browser update changes them, and they are
+  // only ever descriptive (the same values every website already receives).
+  try {
+    patch[K_BROWSER_UA] = String((self.navigator && navigator.userAgent) || '').slice(0, 400);
+    const br = (self.navigator && navigator.userAgentData && navigator.userAgentData.brands) || [];
+    patch[K_BROWSER_BRANDS] = br.map((b) => ({ brand: String(b.brand || '').slice(0, 60), version: String(b.version || '').slice(0, 20) })).slice(0, 12);
+  } catch { /* keep whatever was stored */ }
   if (Object.keys(patch).length) await setLocal(patch);
-  return { id: patch[K_BROWSER_ID] || cur[K_BROWSER_ID], name: patch[K_BROWSER_NAME] || cur[K_BROWSER_NAME] };
+  return {
+    id: patch[K_BROWSER_ID] || cur[K_BROWSER_ID],
+    name: patch[K_BROWSER_NAME] || cur[K_BROWSER_NAME],
+    ua: patch[K_BROWSER_UA] || cur[K_BROWSER_UA] || '',
+    brands: patch[K_BROWSER_BRANDS] || cur[K_BROWSER_BRANDS] || [],
+  };
 }
 
 // Capabilities advertised by `status`.
@@ -774,8 +790,8 @@ async function startPairing() {
 // Sent on every (re)connect.
 async function sendIdentity() {
   try {
-    const { id, name } = await ensureBrowserIdentity();
-    await sendToOffscreen({ type: 'WS_SEND', frame: { type: 'hello', role: 'extension', version: VERSION, browserId: id, browserName: name } });
+    const { id, name, ua, brands } = await ensureBrowserIdentity();
+    await sendToOffscreen({ type: 'WS_SEND', frame: { type: 'hello', role: 'extension', version: VERSION, browserId: id, browserName: name, ua, brands } });
   } catch { /* offscreen not ready; next connect will retry */ }
 }
 

@@ -28,6 +28,17 @@ const version = JSON.parse(readFileSync(join(ROOT, 'bridge', 'package.json'), 'u
 const DIST = join(ROOT, 'dist');
 const STAGE = join(DIST, 'browser-bridge');
 
+// Pre-release checks (versions, secrets, tracked-file hygiene, deps, loopback
+// posture). Skippable for a local scratch build, never for a real release.
+if (!process.argv.includes('--skip-preflight')) {
+  try {
+    execFileSync('node', [join(ROOT, 'scripts', 'preflight.mjs')], { cwd: ROOT, stdio: 'inherit' });
+  } catch {
+    console.error('\nBuild ABORTED by preflight. Fix the failures above, or pass --skip-preflight for a scratch build.');
+    process.exit(1);
+  }
+}
+
 console.log('Building Browser Bridge v' + version + '…');
 rmSync(STAGE, { recursive: true, force: true });
 mkdirSync(STAGE, { recursive: true });

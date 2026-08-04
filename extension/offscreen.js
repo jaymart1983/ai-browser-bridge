@@ -48,8 +48,14 @@ function connect() {
     // Announce ourselves + WHICH browser we are, so the bridge can map this socket
     // to a linked browser (and route/activate correctly with several linked).
     let ident = {};
-    try { ident = await chrome.storage.local.get(['browserId', 'browserName']); } catch {}
-    safeSend({ type: 'hello', role: 'extension', version: extVersion, browserId: ident.browserId || null, browserName: ident.browserName || null });
+    try { ident = await chrome.storage.local.get(['browserId', 'browserName', 'browserUa', 'browserBrands']); } catch {}
+    safeSend({
+      type: 'hello', role: 'extension', version: extVersion,
+      browserId: ident.browserId || null, browserName: ident.browserName || null,
+      // Descriptive only — the control panel shows these so look-alike Chromium
+      // browsers can be told apart. The service worker keeps them fresh.
+      ua: ident.browserUa || '', brands: ident.browserBrands || [],
+    });
   });
 
   ws.addEventListener('message', (ev) => {

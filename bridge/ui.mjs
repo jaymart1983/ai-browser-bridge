@@ -164,13 +164,31 @@ function configPage() {
         var bs=d.browsers||[];
         if(!bs.length){ box.innerHTML='<span class="mut">No browsers linked yet. Install the extension in a browser and click Link.</span>'; return; }
         box.innerHTML=bs.map(function(b){
+          // The evidence behind the name. Two Chromium forks can both call themselves
+          // "Chrome" in the UA, so the brand list is usually what actually tells them
+          // apart — show it, and mark which brand the auto-name came from.
+          var generic=/^(chromium|google chrome|microsoft edge)$/i;
+          var brands=(b.brands||[]).map(function(x){
+            var isNoise=/^not/i.test(x.brand)||generic.test(x.brand);
+            var picked=!isNoise;
+            return '<span class="tag'+(picked?' on':'')+'" title="'+esc(x.brand+' '+(x.version||''))+'">'+esc(x.brand)+(x.version?' '+esc(x.version):'')+'</span>';
+          }).join(' ');
+          var detail='';
+          if(brands||b.ua){
+            detail='<div class="mut" style="font-size:11px;margin:3px 0 0 17px;width:100%">'
+              +(brands?'<div style="margin-bottom:3px">'+brands+'</div>':'')
+              +(b.ua?'<div style="word-break:break-all;opacity:.85"><code>'+esc(b.ua)+'</code></div>':'')
+              +'</div>';
+          }
           return '<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line)">'
             +'<span style="width:9px;height:9px;border-radius:50%;display:inline-block;background:'+(b.connected?'var(--ok)':'var(--mut)')+'"></span>'
             +'<span class="grow"><b>'+esc(b.name)+'</b> '+(b.active?'<span class="tag on">active</span>':'')
+            +(b.renamed?' <span class="tag" title="You named this browser. Reconnects will not overwrite it.">custom name</span>':'')
             +' <span class="mut" style="font-size:11px">'+(b.connected?'connected':'offline')+'</span></span>'
             +(b.active?'':'<button data-use="'+esc(b.id)+'" class="primary">Use this browser</button>')
             +'<button data-ren="'+esc(b.id)+'" data-name="'+esc(b.name||'')+'">Rename</button>'
-            +'<button data-unlink="'+esc(b.id)+'" class="bad">Unlink</button></div>';
+            +'<button data-unlink="'+esc(b.id)+'" class="bad">Unlink</button>'
+            +detail+'</div>';
         }).join('');
         box.querySelectorAll('[data-use]').forEach(function(el){el.onclick=async function(){await fetch('/bridge/activate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({browserId:el.getAttribute('data-use')})});load();};});
         box.querySelectorAll('[data-ren]').forEach(function(el){el.onclick=async function(){var n=prompt('Label for this browser (e.g. Island, Work Edge):',el.getAttribute('data-name')||'');if(n==null||!n.trim())return;await fetch('/bridge/rename',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({browserId:el.getAttribute('data-ren'),name:n.trim()})});load();};});

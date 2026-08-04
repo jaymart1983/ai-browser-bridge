@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { startTray, setTrayState, stopTray } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle, coreToolNames } from './mcp.mjs';
-import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision } from './pairing.mjs';
+import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision, setBrowserMeta } from './pairing.mjs';
 import { configureRules, resolveTabUrl } from './rules.mjs';
 import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -640,6 +640,7 @@ wss.on('connection', (ws) => {
         ws._browserId = bid;
         adoptLegacyForBrowser(bid, msg.browserName);
         touchBrowser(bid, msg.browserName);
+        setBrowserMeta(bid, msg.ua, msg.brands);
         agentSockets.set(bid, ws);
         // EMBEDDED MODE: the host ships and pins exactly one extension and removes the
         // UI that would otherwise select the active browser, so the browser that

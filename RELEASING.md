@@ -73,6 +73,44 @@ users who want the tray run `npm install` in `bridge/` after extracting. If you
 ever want a truly turnkey tray, build the macOS zip on macOS with `systray2`
 installed and ship a macOS-only `bridge/node_modules`.
 
+## Pre-release checks
+
+```
+node scripts/preflight.mjs          # report (exit 1 on any FAIL)
+node scripts/preflight.mjs --strict # also exit 1 on warnings
+```
+
+`build-release.mjs` runs this automatically and **aborts on a FAIL**. Pass
+`--skip-preflight` only for a local scratch build, never for something you publish.
+
+Every check exists because a real defect got past. Two releases shipped broken (a
+source file missing from the zip; a file referenced only from `manifest.json`), and
+both were invisible until a user hit them.
+
+| Check | FAIL means |
+|---|---|
+| **version** | `bridge/package.json` and `extension/manifest.json` disagree — they ship as one unit |
+| **git tracked-file hygiene** | a gitignored file is *also tracked* (ignore rules don't apply to tracked files — this is how state, logs or recordings leak into a public repo), or a `.bridge-state.json` / `.log` / `recordings/` / `.env` / `dist/` file is tracked |
+| **secrets** | a private key, cloud/API key, or hardcoded credential literal in tracked source |
+| **logging** | a variable that *holds* a secret reaches a log. Tuned to this codebase's real names (`access`, `refresh`, `mac`, …); string literals, `!!x` and `.length` are excluded so "was a verifier supplied?" doesn't trip it |
+| **network** | the server binds anything but loopback, or wildcard CORS appears — loopback is the trust boundary for the whole design |
+| **deps** | a high/critical advisory in a dependency that ships inside the zip |
+| **runtime** | `runtime.json` lost its pinned Node version or repo |
+
+Warnings (don't block, but read them): uncommitted changes, available dependency
+updates, low/moderate advisories, and `.gitignore` rules naming a path that no longer
+exists — that last one usually means a file *moved and is now unprotected*.
+
+Not automated, still worth a human pass when the diff touches them:
+
+- **New HTTP route** — is it inside the embedded-mode whitelist decision, and does it
+  need auth? Embedded serves only `/mcp` and `/health`.
+- **New MCP tool** — does it have a permission verb in `bridge/rules.mjs`, and should
+  it be capability-gated?
+- **New module manifest field** — does the module contract in `docs/` still describe it?
+- **Anything touching approvals** — an approval must still require a signature from the
+  paired extension.
+
 ## Cut a release
 
 ```
@@ -81,7 +119,7 @@ installed and ship a macOS-only `bridge/node_modules`.
 git commit -am "Release v0.2.0" && git push origin main
 # 3. tag + push the tag
 git tag v0.2.0 && git push origin v0.2.0
-# 4. build the zips
+# 4. build the zips (runs preflight, then the payload guards)
 node scripts/build-release.mjs
 # 5. publish the GitHub Release with the two zips attached
 gh release create v0.2.0 dist/browser-bridge-*-v0.2.0.zip \

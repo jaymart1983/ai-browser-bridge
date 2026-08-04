@@ -51,8 +51,31 @@ export function pairingStatus() {
 // All linked browsers, tagged with live connection + active flags.
 export function listBrowsers(connected = new Set()) {
   return Object.values(state.browsers)
-    .map((b) => ({ id: b.id, name: b.name || 'Browser', created: b.created || 0, lastSeen: b.lastSeen || 0, connected: connected.has(b.id), active: b.id === state.activeBrowser }))
+    .map((b) => ({
+      id: b.id, name: b.name || 'Browser', renamed: !!b.renamed,
+      created: b.created || 0, lastSeen: b.lastSeen || 0,
+      connected: connected.has(b.id), active: b.id === state.activeBrowser,
+      // Descriptive signals so the user can tell look-alike Chromium browsers apart,
+      // and see what the auto-name was derived from.
+      ua: b.ua || '', brands: b.brands || [],
+    }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+}
+
+// Record the browser's self-reported signals (from `hello`). Kept separate from the
+// name so refreshing them can never disturb a user's chosen label.
+export function setBrowserMeta(browserId, ua, brands) {
+  const b = state.browsers[browserId];
+  if (!b) return false;
+  const nextUa = typeof ua === 'string' ? ua.slice(0, 400) : '';
+  const nextBrands = Array.isArray(brands)
+    ? brands.slice(0, 12).map((x) => ({ brand: String((x && x.brand) || '').slice(0, 60), version: String((x && x.version) || '').slice(0, 20) })).filter((x) => x.brand)
+    : [];
+  if (b.ua === nextUa && JSON.stringify(b.brands || []) === JSON.stringify(nextBrands)) return false;
+  if (nextUa) b.ua = nextUa;
+  if (nextBrands.length) b.brands = nextBrands;
+  save();
+  return true;
 }
 
 export function setActiveBrowser(browserId) {
