@@ -9,7 +9,7 @@
 //
 // Loopback-only; the whole thing rides on the loopback HTTP server.
 
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { state, save } from './state.mjs';
 import { verifyDecision } from './pairing.mjs';
 
@@ -26,6 +26,10 @@ const CODE_TTL_MS = 5 * 60 * 1000;
 // from a single agent, which buries the real requests and inflates the badge.
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const PENDING_MAX = 20;
+// Whether /oauth/status requires proof that the caller initiated the request before it
+// hands back the code. Flip to true once every polling client sends it; until then an
+// unproven caller is warned in the log but still served. See docs/oauth-status-proof.md.
+const ENFORCE_STATUS_PROOF = false;
 
 // Notify the extension (for the toolbar badge) whenever the pending-request count
 // changes, so an incoming connection surfaces as an icon indicator + popup entry
@@ -225,7 +229,8 @@ function consentPage(p) {
 </div>
 <script>
 const reqId=${JSON.stringify(p.reqId)};
-setInterval(async()=>{try{const r=await fetch('/oauth/status?reqId='+encodeURIComponent(reqId),{cache:'no-store'});const j=await r.json();
+const pageSecret=${JSON.stringify(p.pageSecret)};
+setInterval(async()=>{try{const r=await fetch('/oauth/status?reqId='+encodeURIComponent(reqId)+'&ps='+encodeURIComponent(pageSecret),{cache:'no-store'});const j=await r.json();
  if(j.redirect){document.getElementById('w').textContent='Approved — returning to the agent…';location.href=j.redirect;}
  else if(j.denied){document.getElementById('w').textContent='Denied.';}}catch{}},1000);
 </script>`;
@@ -299,7 +304,7 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
       code_challenge: q.get('code_challenge'),
       resource: q.get('resource') || resourceUrl(req),
       stateParam: q.get('state') || '',
-      created: now(), decided: false,
+      created: now(), decided: false, pageSecret: rand(12),
     };
     // Consent is ALWAYS required to (re)authorize. This is the anti-masquerade
     // gate: routine token rotation happens silently via the refresh_token (a
@@ -364,9 +369,29 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
   }
 
   // Consent status poll (used by the consent page and could be used by popup).
+  // Returning the approved redirect here means returning the CODE, and this endpoint is
+  // unauthenticated loopback while /bridge/status publishes every reqId — so any local
+  // process could read a code approved for another agent. PKCE stops it being spendable,
+  // and the DoS that made it exploitable is fixed, but a caller should still prove it
+  // initiated the request. Proof is the code_challenge (only the authorizing client
+  // knows it — never published) or the per-request secret embedded in the consent page.
+  // GRACE PERIOD: an unproven caller still gets the code, and is named in the log so a
+  // client can confirm it has migrated. Flip ENFORCE_STATUS_PROOF once they have.
   if (req.method === 'GET' && path === '/oauth/status') {
     const p = pending.get(url.searchParams.get('reqId'));
     if (!p) { json(res, 404, { error: 'unknown' }); return true; }
+    const eq = (a, b) => {
+      const A = Buffer.from(String(a || '')), B = Buffer.from(String(b || ''));
+      return !!a && !!b && A.length === B.length && timingSafeEqual(A, B);
+    };
+    const proven = eq(url.searchParams.get('cc'), p.code_challenge) || eq(url.searchParams.get('ps'), p.pageSecret);
+    if (!proven && p.decided && p.approved) {
+      if (!p.warnedNoProof) {
+        p.warnedNoProof = true;
+        console.log(`[oauth] status: "${p.client_name}" read a code without proof — it should poll with &cc=<code_challenge>. See docs/oauth-status-proof. (allowed for now)`);
+      }
+      if (ENFORCE_STATUS_PROOF) { json(res, 200, { approved: true }); return true; }
+    }
     if (p.decided && p.approved) { console.log('[oauth] STATUS → consent tab redirecting to', finalRedirect(p)); json(res, 200, { redirect: finalRedirect(p) }); }
     else if (p.decided) json(res, 200, { denied: true });
     else json(res, 200, { pending: true });
