@@ -381,9 +381,19 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
     if (gt === 'authorization_code') {
       const rec = codes.get(form.code);
       if (!rec || rec.exp < now()) { console.log('[oauth] token: bad/expired code (present?', !!rec, ')'); json(res, 400, { error: 'invalid_grant' }); return true; }
-      codes.delete(form.code); // single-use
-      if (rec.redirect_uri && form.redirect_uri && rec.redirect_uri !== form.redirect_uri) { console.log('[oauth] token: redirect_uri mismatch code=', rec.redirect_uri, 'req=', form.redirect_uri); json(res, 400, { error: 'invalid_grant' }); return true; }
-      if (!form.code_verifier || sha256(form.code_verifier) !== rec.code_challenge) { console.log('[oauth] token: PKCE failed for', rec.name); json(res, 400, { error: 'invalid_grant', error_description: 'PKCE failed' }); return true; }
+      // A FAILED exchange must not consume the code. Deleting it up front let any local
+      // process that had read the code present a bogus verifier and destroy a legitimate
+      // client's pending exchange — the client then re-authorized, forever. PKCE already
+      // stops the thief from getting tokens; it must not also hand them a denial of
+      // service. Bounded retries keep the code single-use against actual brute force
+      // (the verifier is 32 random bytes, so 5 tries is enormously generous).
+      const burn = (why) => {
+        rec.fails = (rec.fails || 0) + 1;
+        if (rec.fails >= 5) { codes.delete(form.code); console.log('[oauth] token: code dropped after repeated failures —', why); }
+      };
+      if (rec.redirect_uri && form.redirect_uri && rec.redirect_uri !== form.redirect_uri) { console.log('[oauth] token: redirect_uri mismatch code=', rec.redirect_uri, 'req=', form.redirect_uri); burn('redirect_uri mismatch'); json(res, 400, { error: 'invalid_grant' }); return true; }
+      if (!form.code_verifier || sha256(form.code_verifier) !== rec.code_challenge) { console.log('[oauth] token: PKCE failed for', rec.name); burn('PKCE'); json(res, 400, { error: 'invalid_grant', error_description: 'PKCE failed' }); return true; }
+      codes.delete(form.code); // single-use — consumed only by a SUCCESSFUL exchange
       const access = rand(32), refresh = rand(32);
       state.tokens[access] = { client_id: rec.client_id, resource: rec.resource, exp: now() + ACCESS_TTL_MS };
       state.refresh[refresh] = { client_id: rec.client_id, resource: rec.resource };
