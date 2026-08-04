@@ -230,9 +230,10 @@ function consentPage(p) {
 <script>
 const reqId=${JSON.stringify(p.reqId)};
 const pageSecret=${JSON.stringify(p.pageSecret)};
-setInterval(async()=>{try{const r=await fetch('/oauth/status?reqId='+encodeURIComponent(reqId)+'&ps='+encodeURIComponent(pageSecret),{cache:'no-store'});const j=await r.json();
- if(j.redirect){document.getElementById('w').textContent='Approved — returning to the agent…';location.href=j.redirect;}
- else if(j.denied){document.getElementById('w').textContent='Denied.';}}catch{}},1000);
+const t=setInterval(async()=>{try{const r=await fetch('/oauth/status?reqId='+encodeURIComponent(reqId)+'&ps='+encodeURIComponent(pageSecret),{cache:'no-store'});const j=await r.json();
+ if(j.done){document.getElementById('w').textContent='Approved — the agent has what it needs. You can close this tab.';clearInterval(t);}
+ else if(j.redirect){document.getElementById('w').textContent='Approved — returning to the agent…';location.href=j.redirect;}
+ else if(j.denied){document.getElementById('w').textContent='Denied.';clearInterval(t);}}catch{}},1000);
 </script>`;
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -384,7 +385,16 @@ code{font-size:12px;opacity:.8}.s{font-size:13px;opacity:.7;margin-top:12px}</st
       const A = Buffer.from(String(a || '')), B = Buffer.from(String(b || ''));
       return !!a && !!b && A.length === B.length && timingSafeEqual(A, B);
     };
-    const proven = eq(url.searchParams.get('cc'), p.code_challenge) || eq(url.searchParams.get('ps'), p.pageSecret);
+    const byClient = eq(url.searchParams.get('cc'), p.code_challenge);
+    const byPage = eq(url.searchParams.get('ps'), p.pageSecret);
+    const proven = byClient || byPage;
+    // The browser redirect exists ONLY to hand the code to the client. A client that
+    // polls for it (proving with its code_challenge) already has it, so navigating the
+    // consent tab to its redirect_uri afterwards delivers nothing — and if that URI
+    // isn't a live endpoint, the user watches a dead page load for no reason. Once the
+    // client has collected the code, tell the page to close instead of navigating.
+    if (byClient && p.decided && p.approved) p.codeCollected = true;
+    if (byPage && p.codeCollected) { json(res, 200, { done: true }); return true; }
     if (!proven && p.decided && p.approved) {
       if (!p.warnedNoProof) {
         p.warnedNoProof = true;
