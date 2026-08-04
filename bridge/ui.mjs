@@ -320,6 +320,51 @@ function configPage() {
     </script>`, '/config');
 }
 
+// Built-in page for a module that ships no UI of its own. Everything shown is what the
+// module registered with the bridge, so it stays accurate without the module doing
+// anything: what it can do, where it may act, and which rules govern it.
+function defaultModulePage(mod) {
+  const dests = allDestinations().filter((d) => d.moduleId === mod.id);
+  const rules = (state.rules || []).filter((r) => r.moduleId === mod.id);
+  const tools = Object.entries(mod.tools || {});
+  const row = (k, v) => `<tr><td style="width:150px" class="mut">${esc(k)}</td><td>${v}</td></tr>`;
+
+  const about = `<div class="card"><table>
+    ${row('Module id', `<code>${esc(mod.id)}</code>`)}
+    ${mod.version ? row('Version', esc(mod.version)) : ''}
+    ${row('Status', `<span class="tag on">enabled</span>`)}
+    ${mod.capabilities && mod.capabilities.length ? row('Extension capabilities', mod.capabilities.map((c) => `<span class="tag">${esc(c)}</span>`).join(' ')) : ''}
+  </table>${mod.description ? `<div class="mut" style="font-size:12px;margin-top:8px">${esc(mod.description)}</div>` : ''}</div>`;
+
+  const toolRows = tools.length ? tools.map(([name, t]) => `<tr>
+      <td><code>${esc(name)}</code>${t.verb ? ` <span class="tag">${esc(t.verb)}</span>` : ''}</td>
+      <td class="mut" style="font-size:12px">${esc(String(t.description || '').split('\n')[0]).slice(0, 200)}</td></tr>`).join('')
+    : '<tr><td colspan=2 class="mut">This module provides no tools.</td></tr>';
+
+  const destRows = dests.length ? dests.map((d) => `<tr>
+      <td><b>${esc(d.name || d.id)}</b><div class="mut" style="font-size:11px"><code>${esc(d.id)}</code></div></td>
+      <td>${(d.patterns || []).length
+        ? (d.patterns || []).map((x) => `<code>${esc(x)}</code>`).join(' ')
+        : '<span class="tag off">no patterns — rules using this destination deny everything</span>'}</td></tr>`).join('')
+    : '<tr><td colspan=2 class="mut">This module declares no destinations.</td></tr>';
+
+  const ruleRows = rules.length ? rules.map((r) => `<tr>
+      <td><span class="tag ${r.action === 'deny' ? 'deny' : 'allow'}">${r.action === 'deny' ? 'deny' : 'allow'}</span> ${esc(r.source)}</td>
+      <td>→ ${esc(r.destination)}</td>
+      <td>${(r.permissions || []).map((x) => `<span class="tag">${esc(x)}</span>`).join(' ')}</td></tr>`).join('')
+    : '<tr><td colspan=3 class="mut">No rules reference this module.</td></tr>';
+
+  const body = `${about}
+    <h2>Tools <span class="mut" style="font-size:12px;font-weight:400">exposed to authorized agents over MCP</span></h2>
+    <div class="card"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>${toolRows}</tbody></table></div>
+    <h2>Destinations <span class="mut" style="font-size:12px;font-weight:400">where this module's rules may apply</span></h2>
+    <div class="card"><table><thead><tr><th>Destination</th><th>Patterns</th></tr></thead><tbody>${destRows}</tbody></table></div>
+    <h2>Rules</h2>
+    <div class="card"><table><thead><tr><th>Source</th><th>Destination</th><th>Permissions</th></tr></thead><tbody>${ruleRows}</tbody></table>
+      <div class="mut" style="font-size:12px;margin-top:8px">Edit these in the <a href="/rules">Rule builder</a>. This module ships no settings page of its own — everything above is what it registered with the bridge.</div></div>`;
+  return moduleShell(mod, { header: 'Provided by the module — no custom settings page.', body });
+}
+
 function modulesPage() {
   const mods = listModules();
   const rows = mods.length ? mods.map((m) => `
@@ -328,7 +373,7 @@ function modulesPage() {
         <div class="mut" style="font-size:12px">${esc(m.description)}</div></div>
       <form method=POST action="/modules/toggle"><input type=hidden name=id value="${esc(m.id)}"><input type=hidden name=enabled value="${m.enabled ? '0' : '1'}">
         <button class="${m.enabled ? '' : 'primary'}">${m.enabled ? 'Disable' : 'Enable'}</button></form>
-      ${m.enabled ? `<a href="/modules/${esc(m.id)}"><button>Configure →</button></a>` : ''}
+      ${m.enabled ? `<a href="/modules/${esc(m.id)}"><button>${(() => { const mm = getModule(m.id); return mm && mm.ui && typeof mm.ui.handler === 'function' ? 'Configure' : 'Details'; })()} →</button></a>` : ''}
       <form method=POST action="/modules/delete" onsubmit="return confirm('Delete the ${esc(m.name)} module? This removes its file, rules, and settings.')"><input type=hidden name=id value="${esc(m.id)}"><button class=bad>Delete</button></form>
     </div>`).join('') : '<div class="card mut">No modules found in bridge/modules/.</div>';
   const upload = `<h2>Add a module</h2>
@@ -498,6 +543,9 @@ export async function uiRoutes(req, res, url) {
       await mod.ui.handler(req, res, url, getModuleCtx(), { uiChrome, moduleShell, esc, readBody, htmlRes, jsonRes, redirect, mod });
       return true;
     }
+    // A module needn't ship a UI. Render what the bridge already knows about it rather
+    // than 404-ing a link the Modules page itself offers.
+    if (mod) { htmlRes(res, defaultModulePage(mod)); return true; }
   }
   return false;
 }

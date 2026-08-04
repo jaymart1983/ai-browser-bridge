@@ -324,11 +324,18 @@ export function moduleDashboardPath() {
   return null;
 }
 
+// Nav for enabled modules. A module may declare its own navLinks; one that doesn't
+// still gets an entry pointing at its page (the bridge renders a default page for
+// modules with no UI of their own), so every enabled module is discoverable rather
+// than silently absent just because it ships no interface.
 export function allNavLinks() {
   const out = [];
   for (const id of state.modulesEnabled) {
     const mod = registry.get(id);
-    for (const l of (mod && mod.navLinks) || []) out.push({ ...l, moduleId: id });
+    if (!mod) continue;
+    const declared = mod.navLinks || [];
+    if (declared.length) { for (const l of declared) out.push({ ...l, moduleId: id }); }
+    else out.push({ label: mod.name || id, href: '/modules/' + id, moduleId: id });
   }
   return out;
 }
