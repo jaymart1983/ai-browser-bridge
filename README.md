@@ -22,11 +22,16 @@ There are two halves:
 An authorized agent gets the full set of primitives: list tabs, read a page,
 click, fill, scroll, navigate, open and close tabs, upload and download files,
 record a tab to disk, and annotate over the page. There is one access control,
-and it is the one worth having: **which sites are in scope**. Under Tabs you set a
-default for sites you have not decided about (Off on a fresh install), and you can
-turn any individual site on or off regardless of that default — so "everything
-except my bank" and "nothing except this one site" are both one click. A call
-against a site that is off is refused, whether it comes from an agent or a module.
+and it is the one worth having: **what may be done, and where**. Under Tabs you
+write an ordered list of site rules, read top to bottom, ending in a default line
+that covers everything else. Each row grants **read**, **control**, **record** and
+**annotate** independently, so "read my bank but never touch it" is a row, not a
+compromise.
+
+`read` is the master: with read off for a site, nothing else applies there. And
+there is no separate "write" — filling a field can submit a form, so typing and
+clicking are both `control`. A refusal names the site and the capability, and
+applies equally to agents and to scheduled modules.
 
 ## Automations (modules)
 
@@ -113,9 +118,9 @@ Then, one time:
    the bridge and the extension trust each other. After linking, the browser is
    paired and no shared password is used.
 
-5. Choose which sites are in scope. Open http://127.0.0.1:8787/tabs and pick
-   All tabs, or add the sites you want. It starts Off, so nothing works until
-   you do this.
+5. Decide what agents may do. Open http://127.0.0.1:8787/tabs. The bottom line
+   ("Everything else") starts all-off, so nothing works until you turn something
+   on there, or add a site rule above it.
 
 6. Connect your agent. See "Connecting an agent" below. In short: register
    http://127.0.0.1:8787/mcp with your agent, authenticate, and approve the
@@ -123,8 +128,10 @@ Then, one time:
 
 Once connected, the agent has the full browser tool set (browser_navigate,
 browser_read, browser_click, browser_fill, browser_screenshot, browser_download,
-browser_upload, browser_annotate, browser_monitor_*, and so on) on the sites you
-enabled under Tabs.
+browser_upload, browser_annotate, browser_monitor_*, and so on), each usable
+wherever your Tabs rules grant the matching capability. browser_tabs_list reports
+`can:{read,control,record,annotate}` per tab, so an agent can see its limits
+without probing for them.
 
 ## Connecting an agent
 

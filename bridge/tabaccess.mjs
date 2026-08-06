@@ -1,19 +1,25 @@
-// tabaccess.mjs — which tabs the bridge may touch at all.
+// tabaccess.mjs — what the bridge may do, and where.
 //
-// Replaces the 2.0-era rules engine. That engine gated every call as
-// (agent → destination : permission), which meant a matrix nobody edited standing
-// between the user and their own browser. In 2.0 an authorized agent gets every
-// primitive, and the ONE control that remains is the one people actually reason
-// about: which sites are in scope. Modules are checked identically — a module
-// cannot reach a tab the user hasn't enabled.
+// One ordered rule list, read top to bottom, ending in a default line. Each row says
+// what a matching site may be used for: read, control, record, annotate (plus where its
+// recordings are kept). Agents and scheduled modules are checked identically — a module
+// gets no more reach than an agent.
 //
-// Deny-by-default: a fresh install has default `off` and grants nothing until you say so.
+// This is NOT the 1.x rules engine coming back. That gated every call as
+// (agent → destination : permission): a three-axis matrix, per agent, that nobody
+// maintained. Here there is one axis — the site — and the same answer applies to every
+// authorized caller, so the whole policy fits on one screen and reads in order.
+//
+// Deny-by-default: a fresh install's default line is all-off and grants nothing.
 
 import { state, save } from './state.mjs';
 
-// The capability names. No longer gates — labels, used by module manifests to declare
-// what they do and by the UI to describe them.
-export const CAPABILITIES = ['read', 'write', 'control', 'record', 'annotate'];
+// `write` is deliberately NOT a separate capability. It looks like the milder half of
+// control — typing versus clicking — but browser_fill accepts `enter`, which calls
+// form.requestSubmit(): filling a form IS committing it. A write/control split would let
+// an agent submit a purchase while the user believed they had withheld the ability to
+// act, which is a distinction that reads as safety without being any. The line that
+// holds is look versus touch: read versus control.
 
 // --- Pattern matching --------------------------------------------------------
 // Escape regex specials INCLUDING '*' (so it becomes \*), then turn \* into .*
@@ -42,173 +48,254 @@ export function matchPattern(pattern, url) {
   return false;
 }
 
-// --- The setting -------------------------------------------------------------
-// A DEFAULT plus per-site OVERRIDES, rather than a mode that swallows the per-tab
-// controls. The old three-mode setting conflated two different things: "what should a
-// site I haven't decided about get" and "turn everything on/off right now". Picking
-// "All tabs" then disabled every individual switch, so there was no way to say
-// "everything except this one" — and no way to say "nothing except this one" without
-// hunting for the right mode first. Now the default answers the first question, an
-// explicit override answers the second, and both directions work.
+// --- The model -----------------------------------------------------------------
+// An ORDERED rule list, evaluated top to bottom, with the last row being the default.
+// This replaces the earlier "default + flat overrides" because the two questions people
+// actually ask are ordered ones: "what does THIS site get" and "what does everything
+// else get". A rule list answers both in reading order.
 //
-// `origins` is a map pattern -> true|false, and an entry SURVIVES even when it happens to
-// agree with the current default. Auto-dropping redundant entries looked tidy but lost
-// real decisions: turn the default off for an hour ("pause everything"), turn it back on,
-// and the site you had deliberately excluded would silently be allowed again. An explicit
-// setting is only removed when you explicitly clear it ("Use default").
+//   rules[]   { id, pattern, caps: { read|control|record|annotate: true|false|null }, storage: 'tmp'|'perm'|null }
+//   default   { read, control, record, annotate, storage }   — the bottom line; binary, always decides
+//   tabs{}    origin -> { read?, control?, record?, annotate?, storage? }  — per-tab, only where no rule decided
+//
+// null in a rule means N/A: that rule expresses no opinion about that capability, so
+// evaluation carries on. A rule that DOES decide a capability LOCKS it — the per-tab
+// switch for it is shown set and disabled, because a control you can move that doesn't
+// change the answer is worse than one you cannot.
+//
+// The default row deliberately does NOT lock: it is what a tab gets when nothing else
+// said, and the user can still override any individual tab.
+
+export const CAPS = ['read', 'control', 'record', 'annotate'];
+export const CAPABILITIES = CAPS; // legacy name, still imported by module manifests
+
+const emptyCaps = () => ({ read: null, control: null, record: null, annotate: null });
+
 export function tabAccess() {
-  const t = state.tabAccess || (state.tabAccess = { default: 'off', origins: {} });
-  // Migrate the 2.0.0–2.0.5 shape (mode + array) in place.
-  if (t.mode) {
-    const list = Array.isArray(t.origins) ? t.origins : [];
-    t.default = t.mode === 'all' ? 'on' : 'off';
-    t.origins = {};
-    if (t.mode === 'selected') for (const p of list) t.origins[p] = true;
-    delete t.mode;
+  let t = state.tabAccess;
+  if (!t || typeof t !== 'object') t = state.tabAccess = {};
+
+  // Migrate 2.0.x shapes. `mode` was 2.0.0–2.0.5; `default:'on'|'off'` + flat `origins`
+  // was 2.0.6. Both carried a single yes/no per site, which becomes read+control+record+
+  // annotate all set the same way — the capability split is new, so anything already
+  // allowed stays allowed rather than quietly losing abilities on upgrade.
+  if (t.mode || typeof t.default === 'string' || Array.isArray(t.origins)) {
+    const allowAll = t.mode === 'all' || t.default === 'on';
+    const list = t.mode
+      ? (Array.isArray(t.origins) ? t.origins.map((p) => [p, true]) : [])
+      : Object.entries(t.origins && typeof t.origins === 'object' ? t.origins : {});
+    const migrated = {
+      rules: list.map(([pattern, on], i) => ({
+        id: 'r' + (i + 1), pattern: String(pattern),
+        caps: { read: !!on, control: !!on, record: !!on, annotate: !!on },
+        storage: null,
+      })),
+      default: { read: allowAll, control: allowAll, record: allowAll, annotate: allowAll, storage: 'tmp' },
+      tabs: {},
+    };
+    t = state.tabAccess = migrated;
     save();
   }
-  if (t.default !== 'on') t.default = 'off';
-  if (!t.origins || typeof t.origins !== 'object' || Array.isArray(t.origins)) t.origins = {};
+
+  if (!Array.isArray(t.rules)) t.rules = [];
+  if (!t.default || typeof t.default !== 'object') t.default = { read: false, control: false, record: false, annotate: false, storage: 'tmp' };
+  for (const c of CAPS) t.default[c] = !!t.default[c];
+  if (t.default.storage !== 'perm') t.default.storage = 'tmp';
+  if (!t.tabs || typeof t.tabs !== 'object' || Array.isArray(t.tabs)) t.tabs = {};
   return t;
 }
 
-const defaultOn = () => tabAccess().default === 'on';
-
-// The explicit setting for a pattern, or null when it just follows the default.
-export function originSetting(pattern) {
-  const v = tabAccess().origins[pattern];
-  return typeof v === 'boolean' ? v : null;
-}
-
-export function setDefaultAccess(on) {
+// --- Resolution ----------------------------------------------------------------
+// Returns, for one URL, every capability's value AND where it came from, because the UI
+// has to render "set by a rule, don't touch" differently from "you chose this".
+// `source`: 'rule' (locked) | 'tab' (your per-tab choice) | 'default'.
+export function resolve(url) {
   const t = tabAccess();
-  t.default = on ? 'on' : 'off';
-  // Explicit per-site settings are NOT pruned here — see the note above.
-  save();
-  return { ok: true, tabAccess: { ...t } };
-}
+  const origin = originOf(url);
+  const tab = (origin && t.tabs[origin]) || {};
+  const out = {};
 
-// Set one site explicitly. Passing null clears the override (back to following default).
-export function setOriginAccess(pattern, on) {
-  const t = tabAccess();
-  const p = String(pattern || '').trim();
-  if (!p) return { ok: false, error: 'origin required' };
-  if (on === null) delete t.origins[p]; // "Use default" — the only way to forget a site
-  else t.origins[p] = !!on;
-  if (Object.keys(t.origins).length > 400) return { ok: false, error: 'too many site overrides' };
-  save();
-  return { ok: true, tabAccess: { ...t } };
-}
-
-export function toggleOrigin(pattern) {
-  const cur = originSetting(pattern);
-  const effective = cur === null ? defaultOn() : cur;
-  return setOriginAccess(pattern, !effective);
-}
-
-// Bulk: force every listed site to on/off. Used by the column header control, which
-// operates on exactly the tabs currently listed — not on the default, so a bulk action
-// never silently changes what future tabs get.
-export function setManyAccess(patterns, on) {
-  for (const p of patterns) setOriginAccess(p, on);
-  return { ok: true, tabAccess: { ...tabAccess() } };
-}
-
-// Kept for the /bridge/tabaccess POST body and tests.
-export function setTabAccess({ default: dflt, origins }) {
-  const t = tabAccess();
-  if (dflt === 'on' || dflt === 'off') t.default = dflt;
-  if (origins && typeof origins === 'object' && !Array.isArray(origins)) {
-    t.origins = {};
-    for (const [k, v] of Object.entries(origins)) if (typeof v === 'boolean') t.origins[String(k)] = v;
+  for (const c of CAPS) {
+    let val = null, source = null, rule = null;
+    for (const r of t.rules) {
+      if (!matchPattern(r.pattern, url)) continue;
+      const v = r.caps ? r.caps[c] : null;
+      if (v === true || v === false) { val = v; source = 'rule'; rule = r; break; }
+    }
+    if (source === null) {
+      if (typeof tab[c] === 'boolean') { val = tab[c]; source = 'tab'; }
+      else { val = t.default[c]; source = 'default'; }
+    }
+    out[c] = { value: val, source, rule: rule ? rule.pattern : null, locked: source === 'rule' };
   }
-  save();
-  return { ok: true, tabAccess: { ...t } };
+
+  // READ IS THE MASTER. Without it an agent cannot see what it is acting on, and every
+  // other capability either depends on reading (control, annotate) or degrades to
+  // something not worth having (record without read is screenshots alone). So read=false
+  // forces the rest off — enforced HERE, not merely greyed in the UI, so the guarantee
+  // holds for every caller.
+  if (!out.read.value) {
+    for (const c of CAPS) {
+      if (c === 'read') continue;
+      if (out[c].value) out[c] = { ...out[c], value: false, forcedByRead: true };
+    }
+  }
+
+  // Storage follows the same order, but it is a qualifier on recordings, not a permission.
+  let storage = null, storageSource = null;
+  for (const r of t.rules) {
+    if (!matchPattern(r.pattern, url)) continue;
+    if (r.storage === 'tmp' || r.storage === 'perm') { storage = r.storage; storageSource = 'rule'; break; }
+  }
+  if (!storage) {
+    if (tab.storage === 'tmp' || tab.storage === 'perm') { storage = tab.storage; storageSource = 'tab'; }
+    else { storage = t.default.storage; storageSource = 'default'; }
+  }
+  out.storage = { value: storage, source: storageSource, locked: storageSource === 'rule' };
+  return out;
 }
 
-// --- The check ---------------------------------------------------------------
+const originOf = (url) => { try { return new URL(url).origin; } catch { return ''; } };
+
+// --- The check -----------------------------------------------------------------
 // `url` may be null for calls that target no particular tab (tabs.list, monitor.list…).
-// Those are allowed whenever anything at all is reachable; their RESULTS are filtered by
-// the caller so a disabled tab is never revealed.
-export function urlAllowed(url) {
-  const t = tabAccess();
-  const on = t.default === 'on';
+// Those pass whenever the capability is reachable ANYWHERE; their results are filtered
+// by the caller so a tab you cannot use is never revealed.
+export function urlAllowed(url, capability = 'read') {
+  const cap = CAPS.includes(capability) ? capability : 'read';
   if (!url) {
-    // Nothing reachable at all = deny even the untargeted calls, so "off" really is off.
-    const anyAllowed = on || Object.values(t.origins).some(Boolean);
-    return anyAllowed
+    return anyAllowed(cap)
       ? { allow: true, reason: 'no specific tab' }
-      : { allow: false, reason: 'tab access is off — turn on tabs in the control panel' };
+      : { allow: false, reason: `no site grants "${cap}" — turn it on in the control panel` };
   }
-  // An explicit setting always wins over the default, in both directions. When SEVERAL
-  // patterns match, the most specific one wins (longest pattern), and a tie goes to deny
-  // — otherwise the answer would depend on the order entries happened to be added, which
-  // is not something anyone can reason about for a security setting.
-  const hits = Object.keys(t.origins).filter((p) => matchPattern(p, url));
-  if (hits.length) {
-    hits.sort((a, b) => (b.length - a.length) || (t.origins[a] === t.origins[b] ? 0 : t.origins[a] ? 1 : -1));
-    const win = hits[0];
-    return t.origins[win]
-      ? { allow: true, reason: `matches ${win}` }
-      : { allow: false, reason: `${safeHost(url)} is turned off (${win})` };
-  }
-  if (on) return { allow: true, reason: 'default is on' };
-  return { allow: false, reason: `${safeHost(url)} is not turned on — enable it in the control panel` };
+  const r = resolve(url)[cap];
+  if (r.value) return { allow: true, reason: r.source === 'rule' ? `rule ${r.rule}` : r.source };
+  if (r.forcedByRead) return { allow: false, reason: `${safeHost(url)} has read turned off, so "${cap}" is off too` };
+  return { allow: false, reason: `${safeHost(url)} does not allow "${cap}"` };
+}
+
+// Could this capability apply to anything at all? Used for untargeted calls.
+function anyAllowed(cap) {
+  const t = tabAccess();
+  if (t.default.read && (cap === 'read' || t.default[cap])) return true;
+  for (const r of t.rules) if (r.caps && r.caps[cap] === true) return true;
+  for (const o of Object.values(t.tabs)) if (o && o[cap] === true) return true;
+  return false;
 }
 
 const safeHost = (u) => { try { return new URL(u).host; } catch { return String(u || '').slice(0, 60); } };
 
+// --- Editing -------------------------------------------------------------------
+let _seq = 0;
+const newId = () => 'r' + Date.now().toString(36) + (++_seq).toString(36);
+
+export function addRule(pattern) {
+  const t = tabAccess();
+  const p = String(pattern || '').trim();
+  if (!p) return { ok: false, error: 'pattern required' };
+  if (t.rules.length >= 200) return { ok: false, error: 'too many rules' };
+  t.rules.push({ id: newId(), pattern: p, caps: emptyCaps(), storage: null });
+  save();
+  return { ok: true };
+}
+
+export function removeRule(id) {
+  const t = tabAccess();
+  t.rules = t.rules.filter((r) => r.id !== id);
+  save();
+  return { ok: true };
+}
+
+// Order matters (first decision wins), so it has to be editable.
+export function moveRule(id, dir) {
+  const t = tabAccess();
+  const i = t.rules.findIndex((r) => r.id === id);
+  const j = dir === 'up' ? i - 1 : i + 1;
+  if (i < 0 || j < 0 || j >= t.rules.length) return { ok: false, error: 'cannot move' };
+  const [x] = t.rules.splice(i, 1);
+  t.rules.splice(j, 0, x);
+  save();
+  return { ok: true };
+}
+
+// Cycle a rule's capability through On -> Off -> N/A, which is the order people reach
+// for: you set it, you change your mind, you stop caring.
+export function cycleRuleCap(id, cap) {
+  const t = tabAccess();
+  const r = t.rules.find((x) => x.id === id);
+  if (!r || !CAPS.includes(cap)) return { ok: false, error: 'unknown rule or capability' };
+  r.caps = r.caps || emptyCaps();
+  r.caps[cap] = r.caps[cap] === true ? false : r.caps[cap] === false ? null : true;
+  // Read off forces the rest off, but their stored values are KEPT. Clearing them looked
+  // tidier until you turn read back on and discover your other choices are gone — the
+  // same way flipping the default used to wipe per-site decisions. The resolver enforces
+  // the consequence; the state remembers the intent.
+  save();
+  return { ok: true };
+}
+
+export function cycleRuleStorage(id) {
+  const t = tabAccess();
+  const r = t.rules.find((x) => x.id === id);
+  if (!r) return { ok: false, error: 'unknown rule' };
+  r.storage = r.storage === 'tmp' ? 'perm' : r.storage === 'perm' ? null : 'tmp';
+  save();
+  return { ok: true };
+}
+
+export function setDefaultCap(cap, on) {
+  const t = tabAccess();
+  if (cap === 'storage') { t.default.storage = on === 'perm' ? 'perm' : 'tmp'; save(); return { ok: true }; }
+  if (!CAPS.includes(cap)) return { ok: false, error: 'unknown capability' };
+  t.default[cap] = !!on; // read-off is enforced by resolve(), not by wiping the others
+  save();
+  return { ok: true };
+}
+
+// Per-tab choice. Only meaningful where no rule decided the capability; the UI disables
+// the control otherwise, and the resolver ignores it either way.
+export function setTabCap(origin, cap, value) {
+  const t = tabAccess();
+  const o = String(origin || '').trim();
+  if (!o) return { ok: false, error: 'origin required' };
+  const rec = t.tabs[o] || (t.tabs[o] = {});
+  if (value === null) delete rec[cap];
+  else if (cap === 'storage') rec.storage = value === 'perm' ? 'perm' : 'tmp';
+  else rec[cap] = !!value; // read-off is enforced by resolve(), not by wiping the others
+  if (!Object.keys(rec).length) delete t.tabs[o];
+  save();
+  return { ok: true };
+}
+
+export function toggleTabCap(origin, cap) {
+  const cur = resolve(origin)[cap];
+  if (cur.locked) return { ok: false, error: 'set by a rule' };
+  if (cap === 'storage') return setTabCap(origin, 'storage', cur.value === 'perm' ? 'tmp' : 'perm');
+  return setTabCap(origin, cap, !cur.value);
+}
+
+// Bulk, for the column headers. Skips anything a rule has locked.
+export function setManyTabCaps(origins, cap, value) {
+  for (const o of origins) {
+    if (resolve(o)[cap].locked) continue;
+    setTabCap(o, cap, value);
+  }
+  return { ok: true };
+}
+
 // --- Recording storage class -------------------------------------------------
-// Where a tab's recording lands: `tmp` ($TMPDIR, cleared by the OS) or `perm`
-// (browser-bridge/recordings, kept). This was module state in 1.x, which meant the
-// answer to "where did my recording go" depended on which module you had installed.
-// It's a bridge setting now, with a per-origin override.
-export function recordingCfg() {
-  const r = state.recording || (state.recording = { default: 'tmp', byOrigin: {} });
-  if (r.default !== 'perm') r.default = 'tmp';
-  if (!r.byOrigin || typeof r.byOrigin !== 'object') r.byOrigin = {};
-  return r;
-}
+// `tmp` ($TMPDIR, cleared by the OS) or `perm` (browser-bridge/recordings, kept). It is
+// not a permission — it only says where a recording goes — but it resolves through the
+// same rule list so there is exactly one precedence order on the page.
 
+// Where THIS url's recording lands. Rule > per-tab > default, same as the capabilities.
 export function storageFor(url) {
-  const r = recordingCfg();
-  let origin = '';
-  try { origin = new URL(url).origin; } catch { return r.default; }
-  const v = r.byOrigin[origin];
-  return v === 'perm' || v === 'tmp' ? v : r.default;
+  try { return resolve(url).storage.value; } catch { return tabAccess().default.storage; }
 }
 
-export function setStorageDefault(value) {
-  recordingCfg().default = value === 'perm' ? 'perm' : 'tmp';
-  save();
-  return { ok: true, recording: { ...recordingCfg() } };
-}
-
-// Toggle one origin between tmp and perm. Clearing back to the default is what you get
-// by toggling twice past it, so the map never accumulates entries equal to the default.
-export function toggleStorage(origin) {
-  const r = recordingCfg();
-  const o = String(origin || '').trim();
-  if (!o) return { ok: false, error: 'origin required' };
-  return setStorageFor(o, (r.byOrigin[o] || r.default) === 'perm' ? 'tmp' : 'perm');
-}
-
-export function setStorageFor(origin, value) {
-  const r = recordingCfg();
-  const o = String(origin || '').trim();
-  if (!o) return { ok: false, error: 'origin required' };
-  const v = value === 'perm' ? 'perm' : 'tmp';
-  if (v === r.default) delete r.byOrigin[o]; else r.byOrigin[o] = v;
-  save();
-  return { ok: true, recording: { ...r } };
-}
-
-// Bulk, for the storage column header. Same rule as access: acts on the listed sites,
-// never on the default.
-export function setManyStorage(origins, value) {
-  for (const o of origins) setStorageFor(o, value);
-  return { ok: true, recording: { ...recordingCfg() } };
-}
+export function setStorageDefault(value) { return setDefaultCap('storage', value === 'perm' ? 'perm' : 'tmp'); }
+export function toggleStorage(origin) { return toggleTabCap(origin, 'storage'); }
+export function setManyStorage(origins, value) { return setManyTabCaps(origins, 'storage', value === 'perm' ? 'perm' : 'tmp'); }
 
 // --- tabId → URL resolution (small cache over relayed tabs.list) -------------
 let _relay = null;

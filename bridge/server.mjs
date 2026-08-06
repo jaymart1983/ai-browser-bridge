@@ -32,7 +32,7 @@ import { startTray, setTrayState, stopTray, refreshTrayMenu } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle, coreToolNames } from './mcp.mjs';
 import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision, setBrowserMeta } from './pairing.mjs';
-import { configureTabAccess, resolveTabUrl, tabAccess, setTabAccess, toggleOrigin, setDefaultAccess, recordingCfg, storageFor } from './tabaccess.mjs';
+import { configureTabAccess, resolveTabUrl, tabAccess, storageFor, setDefaultCap, addRule, urlAllowed } from './tabaccess.mjs';
 import { configureAutomation, startAutomation, noteBrowserActivity, runModuleNow, runningModules } from './automation.mjs';
 import { configureModules, loadModules } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -118,6 +118,53 @@ function embeddedRequireToken(authHeader) {
   return { client_id: 'embedded-host', name: EMBEDDED_SOURCE };
 }
 
+// Is this tab being recorded right now? Asked of the extension rather than inferred from
+// session keys — a key is a storage path, and matching a tab id inside one would be a
+// coincidence, not a fact.
+async function isTabRecording(tabId) {
+  if (!Number.isFinite(tabId)) return false;
+  try {
+    const live = (await relayCommand('monitor.list')) || [];
+    return live.some((m) => Number(m.tabId) === Number(tabId));
+  } catch { return false; }
+}
+
+// Start/stop recording the focused tab from the extension popup. Re-checks the permission
+// here rather than trusting that the button was only shown when allowed — the button is
+// in a page we do not control, so the decision has to be made on this side too.
+async function invokeCoreRecord(tabId, tabUrl) {
+  const d = urlAllowed(tabUrl || '', 'record');
+  if (!d.allow) return { ok: false, error: `recording is not permitted here: ${d.reason}` };
+  const on = await isTabRecording(Number(tabId));
+  try {
+    await relayCommand(on ? 'monitor.stop' : 'monitor.start', { tabId: Number(tabId) });
+    return { ok: true, on: !on };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+
+// POST /bridge/tabaccess — a programmatic way to set access, used by embedded hosts
+// (which have no control panel) and by tests. Accepts the default line, and optionally a
+// list of site rules; deliberately small, since the rule builder is the real interface.
+function applyTabAccessBody(b) {
+  if (b.default && typeof b.default === 'object') {
+    for (const [k, v] of Object.entries(b.default)) setDefaultCap(k, k === 'storage' ? v : !!v);
+  }
+  if (Array.isArray(b.rules)) {
+    for (const r of b.rules) {
+      if (!r || !r.pattern) continue;
+      addRule(String(r.pattern));
+      const t = tabAccess();
+      const added = t.rules[t.rules.length - 1];
+      if (r.caps && typeof r.caps === 'object') {
+        for (const [k, v] of Object.entries(r.caps)) if (v === true || v === false || v === null) added.caps[k] = v;
+      }
+      if (r.storage === 'tmp' || r.storage === 'perm') added.storage = r.storage;
+    }
+    save();
+  }
+  return { ok: true, tabAccess: tabAccess() };
+}
+
 // Everything a host app's own status page (and the slim embedded popup) needs to
 // answer "is this bridge working?" — bearer-gated like the rest of embedded mode.
 function embeddedStatusPayload() {
@@ -142,7 +189,7 @@ function embeddedStatusPayload() {
     modulesEnabled: [...(state.modulesEnabled || [])],
     // 2.0: the one access fact worth reporting. `none` here explains every refusal a
     // host is about to see, which "rules: 0" never did.
-    tabAccess: tabAccess().default,
+    tabAccess: tabAccess().default.read ? 'read' : 'off',
     coreTools: CORE_TOOLS_ALLOW ? [...CORE_TOOLS_ALLOW] : 'all',
   };
 }
@@ -395,9 +442,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/tabaccess') {
     return readJsonBody(req).then((b) => sendJson(res, 200,
-      b && b.origin ? toggleOrigin(String(b.origin))
-        : b && (b.default === 'on' || b.default === 'off') && !b.origins ? setDefaultAccess(b.default === 'on')
-        : setTabAccess(b || {})));
+      applyTabAccessBody(b || {})));
   }
   if (req.method === 'POST' && url.pathname === '/bridge/module/install') {
     const grant = validateToken(req.headers.authorization, req);
@@ -428,13 +473,34 @@ const server = http.createServer((req, res) => {
   // Focused-tab actions: enabled modules expose per-tab actions (e.g. Deep Research
   // "Record this tab") that the extension popup renders for the active tab. Loopback
   // + user-driven; the invoke path performs the module's registered capability.
+  // What the popup offers for the tab in focus. Recording is a CORE action now: the
+  // permission lives on the Tabs page, and the button that acts on it lives where the
+  // user is — in the extension, on the tab they are looking at. It is offered only when
+  // that site actually grants `record`, so the popup never shows a control that would be
+  // refused. (Modules may still contribute their own actions alongside.)
   if (req.method === 'GET' && url.pathname === '/bridge/tab-actions') {
-    return listTabActions(url.searchParams.get('url') || '', url.searchParams.get('tabId')).then((actions) => sendJson(res, 200, { actions }));
+    const tabUrl = url.searchParams.get('url') || '';
+    const tabId = Number(url.searchParams.get('tabId'));
+    return Promise.all([
+      listTabActions(tabUrl, url.searchParams.get('tabId')),
+      urlAllowed(tabUrl, 'record').allow ? isTabRecording(tabId) : Promise.resolve(null),
+    ]).then(([modActions, on]) => {
+      const actions = [];
+      if (on !== null) {
+        actions.push({
+          id: 'record', moduleId: '', on,
+          label: on ? '⏹ Stop recording this tab' : '⏺ Record this tab',
+        });
+      }
+      return sendJson(res, 200, { actions: actions.concat(modActions || []) });
+    });
   }
   if (req.method === 'POST' && url.pathname === '/bridge/tab-actions/invoke') {
-    return readJsonBody(req).then((b) => (b && b.moduleId && b.id
-      ? invokeTabAction(String(b.moduleId), String(b.id), b.tabId, b.url || '')
-      : Promise.resolve({ ok: false, error: 'moduleId and id required' })
+    return readJsonBody(req).then((b) => (b && b.id === 'record' && !b.moduleId
+      ? invokeCoreRecord(b.tabId, b.url || '')
+      : b && b.moduleId && b.id
+        ? invokeTabAction(String(b.moduleId), String(b.id), b.tabId, b.url || '')
+        : Promise.resolve({ ok: false, error: 'moduleId and id required' })
     )).then((r) => sendJson(res, 200, r));
   }
 
@@ -1119,7 +1185,19 @@ server.listen(PORT, HOST, () => {
   log(`  tools POST:   http://${HOST}:${PORT}${COMMAND_PATH}`);
   log(`  perm storage: ${MON_ROOTS.perm}`);
   // Optional menubar tray (blue running / green recording). Never fatal.
-  if (!EMBEDDED) startTray({
+  // The tray represents THE installed bridge. A second process — a dev run from a
+  // checkout, another application's bundled copy, a test instance on a scratch port —
+  // used to add its own indistinguishable icon, so the menu bar could show two Browser
+  // Bridges with no way to tell which was which or which one a click would act on.
+  // An instance not on the default port is by definition not the installed one, so it
+  // stays out of the menu bar. BRIDGE_NO_TRAY=1 forces the same for any instance.
+  const wantTray = !EMBEDDED
+    && process.env.BRIDGE_NO_TRAY !== '1'
+    && PORT === 8787;
+  if (!wantTray && !EMBEDDED) {
+    log(`tray suppressed (${PORT !== 8787 ? 'port ' + PORT + ' is not the default, so this is a secondary instance' : 'BRIDGE_NO_TRAY=1'})`);
+  }
+  if (wantTray) startTray({
     origin: `http://${HOST}:${PORT}`,
     dashboardUrl: `http://${HOST}:${PORT}${moduleDashboardPath() || '/'}`,
     version: BRIDGE_VERSION ? 'v' + BRIDGE_VERSION : '',

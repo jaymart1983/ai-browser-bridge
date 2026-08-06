@@ -156,7 +156,10 @@ function moduleRunCtx(mod) {
       // that isn't open would let any unknown id bypass the check entirely.
       if (!url) throw new Error(`refused: tab ${params.tabId} is not open, or is not one you may use`);
     }
-    const d = urlAllowed(url);
+    // Same per-site, per-capability check an agent gets. `need` is the capability, so a
+    // module declaring only 'read' cannot reach control-level primitives even on a site
+    // where the user granted control.
+    const d = urlAllowed(url, need || 'read');
     if (!d.allow) throw new Error(`refused: ${d.reason}`);
     return _ctx.relayCommand(method, params);
   };
@@ -190,25 +193,25 @@ function moduleRunCtx(mod) {
     tabs: {
       // list() enumerates and FILTERS rather than refusing, so a module can see that a
       // tab exists without being able to touch it.
-      list: async () => ((await _ctx.relayCommand('tabs.list')) || []).filter((t) => urlAllowed(t.url || '').allow),
+      list: async () => ((await _ctx.relayCommand('tabs.list')) || []).filter((t) => urlAllowed(t.url || '', 'read').allow),
       open: (url, opts = {}) => relay('tab.new', { url, active: !!opts.active }, 'control'),
-      navigate: (tabId, url) => relay('tab.navigate', { tabId, url }, 'write'),
+      navigate: (tabId, url) => relay('tab.navigate', { tabId, url }, 'control'),
       close: (tabId) => relay('tab.close', { tabId }, 'control'),
       activate: (tabId) => relay('tab.activate', { tabId }, 'control'),
       focused: async () => {
         const r = await _ctx.relayCommand('tab.focused');
         const t = r && r.tab;
-        return t && urlAllowed(t.url || '').allow ? t : null;
+        return t && urlAllowed(t.url || '', 'read').allow ? t : null;
       },
     },
     read: (tabId, opts = {}) => relay('page.read', { tabId, ...opts }, 'read'),
     eval: (tabId, expression) => relay('page.eval', { tabId, expression }, 'control'),
     click: (tabId, target) => relay('page.click', { tabId, ...(typeof target === 'string' ? { selector: target } : target || {}) }, 'control'),
-    fill: (tabId, selector, value, opts = {}) => relay('page.fill', { tabId, selector, value, ...opts }, 'write'),
+    fill: (tabId, selector, value, opts = {}) => relay('page.fill', { tabId, selector, value, ...opts }, 'control'),
     scroll: (tabId, opts = {}) => relay('page.scroll', { tabId, ...opts }, 'control'),
     screenshot: (tabId) => relay('page.screenshot', { tabId }, 'read'),
     download: (url, opts = {}) => relay('page.download', { url, ...opts }, 'control'),
-    upload: (tabId, selector, files) => relay('page.upload', { tabId, selector, files }, 'write'),
+    upload: (tabId, selector, files) => relay('page.upload', { tabId, selector, files }, 'control'),
     annotate: (tabId, rules) => relay('overlay.set', { tabId, rules }, 'annotate'),
     annotateClear: (tabId, keys) => relay('overlay.clear', { tabId, ...(keys ? { keys } : {}) }, 'annotate'),
     record: {

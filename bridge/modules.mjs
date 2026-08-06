@@ -357,7 +357,9 @@ export function allNavLinks() {
 // specific: a vague "invalid module" costs an agent a round trip and it will guess
 // wrong. Every rejection names the field and what was expected.
 const DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-const ACTIONS = ['read', 'write', 'control', 'record', 'annotate'];
+// No 'write': filling a field can submit a form, so typing and clicking are one
+// capability. See the note in tabaccess.mjs.
+const ACTIONS = ['read', 'control', 'record', 'annotate'];
 
 function validateManifest(m, expectedId) {
   const e = [];

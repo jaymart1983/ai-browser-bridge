@@ -4,9 +4,9 @@
 
 import { state, save } from './state.mjs';
 import {
-  tabAccess, setTabAccess, toggleOrigin, urlAllowed, matchPattern,
-  originSetting, setDefaultAccess, setOriginAccess, setManyAccess,
-  recordingCfg, storageFor, setStorageDefault, toggleStorage, setManyStorage,
+  tabAccess, resolve as resolveAccess, urlAllowed, CAPS,
+  addRule, removeRule, moveRule, cycleRuleCap, cycleRuleStorage,
+  setDefaultCap, toggleTabCap, setManyTabCaps,
 } from './tabaccess.mjs';
 import { listModules, setEnabled, getModule, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall, moduleOwner } from './modules.mjs';
 import { runModuleNow, isRunning } from './automation.mjs';
@@ -374,45 +374,34 @@ function configPage() {
     </script>`, '/config');
 }
 
-// --- Tabs: the one access control in 2.0 -------------------------------------
-// An authorized agent gets every primitive; what it does NOT get is a tab you haven't
-// enabled here. Modules are held to the same line. This page is the whole policy — no
-// matrix of agents × destinations × verbs to maintain.
+// --- Tabs: one ordered rule list ---------------------------------------------
+// Read top to bottom. The first row that has an opinion about a capability decides it
+// and LOCKS the per-tab switch for it; the bottom row is the default, which decides
+// anything unmatched but leaves per-tab switches free.
 async function tabsPage() {
   const t = tabAccess();
-  const rec = recordingCfg();
   const ctx = getModuleCtx();
 
   let openTabs = [];
   try { openTabs = (await ctx.relayCommand('tabs.list')) || []; } catch {}
-  let recording = new Set();
-  try { recording = new Set((((await ctx.relayCommand('monitor.list')) || [])).map((m) => Number(m.tabId))); } catch {}
   const httpTabs = openTabs.filter((x) => /^https?:/.test(x.url || ''));
 
   const post = (action, extra, inner, style = '') =>
     `<form method=POST action="/tabs" style="display:inline-block;margin:0;${style}"><input type=hidden name=action value="${action}">` +
     Object.entries(extra).map(([k, v]) => `<input type=hidden name="${k}" value="${esc(v)}">`).join('') + inner + '</form>';
-  // A toggle plus its label, laid out as [left slot][switch][right slot]. BOTH slots are
-  // always rendered at the same fixed width and only one carries text, so the cell is the
-  // same size in either state — flipping a switch must not resize the column under the
-  // pointer. The label sits on the side the knob is on, so the word and the knob agree.
-  const sw = (on, cls, live) =>
-    `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} ${live ? 'onchange="this.form.submit()"' : 'disabled'}><span class="slider"></span></label>`;
-  const cell = (on, labels, inner) =>
-    `<span class="tgl"><span class="lbl l">${on ? '' : esc(labels[0])}</span>${inner}<span class="lbl r">${on ? esc(labels[1]) : ''}</span></span>`;
-  const toggle = (action, extra, on, labels, cls = '') =>
-    post(action, extra, cell(on, labels, sw(on, cls, true)), 'vertical-align:middle');
-  const dead = (on, labels) => cell(on, labels, sw(on, '', false));
 
+  // Switch geometry lives here rather than in the shared shell because only this page
+  // uses it. Both label slots are always rendered at the same fixed width and only one
+  // carries text, so a cell is the same size in either state — flipping a switch must
+  // not resize the column under the pointer.
   const TGL_CSS = `<style>
     .tgl{display:inline-flex;align-items:center;gap:6px}
-    .tgl .lbl{font-size:11px;color:var(--mut);width:36px;display:inline-block}
+    .tgl .lbl{font-size:11px;color:var(--mut);width:34px;display:inline-block}
     .tgl .lbl.l{text-align:right}
     .tgl .lbl.r{text-align:left}
     td.tc,th.tc{text-align:center;width:1%;white-space:nowrap}
-    /* Tri-state column control: a switch whose knob can also sit in the middle.
-       Two invisible half-width buttons are the hit targets, so "click the side you
-       want" works without any JS. */
+    /* Column header: a switch whose knob can also sit in the middle. Two invisible
+       half-width buttons are the hit targets, so "click the side you want" needs no JS. */
     .tri{position:relative;display:inline-block;width:40px;height:22px;border-radius:22px;
       background:var(--slider);vertical-align:middle;margin-left:6px}
     .tri.s-on{background:var(--accent)}
@@ -424,90 +413,145 @@ async function tabsPage() {
     .tri .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
       background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);pointer-events:none;transition:left .15s}
     .tri.s-off .knob{left:2px} .tri.s-mixed .knob{left:11px} .tri.s-on .knob{left:20px}
+    /* Three-position control for a RULE row: Off / N/A / On. A button rather than a
+       switch, because it cycles rather than flips and the current word has to be readable
+       at a glance — a knob alone cannot say "N/A". */
+    button.tri3{position:relative;width:74px;height:24px;padding:0;border-radius:24px;
+      background:var(--slider);border:1px solid var(--line);font-size:11px;font-weight:600;overflow:hidden}
+    button.tri3 .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
+      background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:left .15s}
+    button.tri3.s-off .knob{left:2px} button.tri3.s-na .knob{left:27px} button.tri3.s-on .knob{left:52px}
+    button.tri3 .t3l{position:absolute;left:0;right:0;top:0;line-height:22px;text-align:center;pointer-events:none}
+    button.tri3.s-on{background:var(--accent);color:#fff}
+    button.tri3.s-na{background:transparent;color:var(--mut)}
+    button.btn.ic{padding:2px 8px;font-size:12px;line-height:1.4}
+    tr.defrow td{background:rgba(127,127,127,.07)}
+    .lockedcell{opacity:.62}
   </style>`;
 
-  // Left label = off state, right label = on state, matching where the knob sits.
-  const ON_OFF = ['Off', 'On'];
-  const TMP_PERM = ['Tmp', 'Perm'];
+  const CAPCOLS = [
+    ['read', 'Read', 'See the page: text, accessibility tree, screenshots.'],
+    ['control', 'Control', 'Act on the page: click, type, scroll, navigate, upload, download, run JS. Typing counts as control because filling a field can submit it.'],
+    ['record', 'Record', 'Capture network responses and screenshots to disk.'],
+    ['annotate', 'Annotate', 'Draw the agent\'s notes over the page.'],
+  ];
 
-  // Tri-state column control. The knob shows where the column stands — all left, all
-  // right, or centred when the tabs disagree — and the two halves are the actions:
-  // click the left half to set the whole column to the left value, the right half for
-  // the right value. A "mixed" column therefore tells you the truth AND offers both
-  // resolutions, which a plain checkbox cannot.
-  const triCell = (action, state3, labels) => `<span class="tri s-${state3}" title="${esc(labels[0])} / ${esc(labels[1])} — click a side to set the whole column">` +
+  // --- controls ---------------------------------------------------------------
+  // Binary switch with the label on the side the knob is on (see TGL_CSS).
+  const sw = (on, cls, live) =>
+    `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} ${live ? 'onchange="this.form.submit()"' : 'disabled'}><span class="slider"></span></label>`;
+  const cell = (on, labels, inner, extraNote = '') =>
+    `<span class="tgl"><span class="lbl l">${on ? '' : esc(labels[0])}</span>${inner}<span class="lbl r">${on ? esc(labels[1]) : ''}</span>${extraNote}</span>`;
+  const toggle = (action, extra, on, labels, cls = '') =>
+    post(action, extra, cell(on, labels, sw(on, cls, true)), 'vertical-align:middle');
+  // A switch that is SET BY A RULE: shown at its real value, disabled, with the pattern
+  // in the tooltip so "why can't I change this" is answerable without hunting.
+  const locked = (on, labels, why) =>
+    `<span class="tgl lockedcell" title="Set by the rule ${esc(why)} above — change it there">` +
+    `<span class="lbl l">${on ? '' : esc(labels[0])}</span>${sw(on, '', false)}<span class="lbl r">${on ? esc(labels[1]) : ''}</span></span>`;
+
+  // Three-position control for a RULE row: Off / N/A / On. N/A is the middle and means
+  // "this rule says nothing about this capability", so evaluation falls through.
+  const tri = (id, cap, v, labels) => {
+    const state3 = v === true ? 'on' : v === false ? 'off' : 'na';
+    return post('rulecap', { id, cap },
+      `<button class="tri3 s-${state3}" title="${esc(labels[0])} / N/A / ${esc(labels[1])} — click to cycle">
+         <span class="knob"></span><span class="t3l">${state3 === 'off' ? esc(labels[0]) : state3 === 'na' ? 'N/A' : esc(labels[1])}</span></button>`);
+  };
+
+  // --- rules table ------------------------------------------------------------
+  const ruleRows = t.rules.map((r, i) => {
+    const readOff = r.caps.read === false;
+    return `<tr>
+      <td style="white-space:nowrap">
+        <div class="mut" style="font-size:11px">${i + 1}</div>
+        <code>${esc(r.pattern)}</code></td>
+      ${CAPCOLS.map(([c]) => `<td class="tc">${
+        c !== 'read' && readOff
+          ? `<span class="tgl lockedcell" title="This rule turns read off, so nothing else can apply"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`
+          : tri(r.id, c, r.caps[c], ['Off', 'On'])}</td>`).join('')}
+      <td class="tc">${post('rulestorage', { id: r.id },
+        `<button class="tri3 s-${r.storage === 'perm' ? 'on' : r.storage === 'tmp' ? 'off' : 'na'}" title="Tmp / N/A / Perm — click to cycle">
+           <span class="knob"></span><span class="t3l">${r.storage === 'perm' ? 'Perm' : r.storage === 'tmp' ? 'Tmp' : 'N/A'}</span></button>`)}</td>
+      <td class="tc" style="white-space:nowrap">
+        ${post('ruleup', { id: r.id }, `<button class="btn ic" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>`)}
+        ${post('ruledown', { id: r.id }, `<button class="btn ic" ${i === t.rules.length - 1 ? 'disabled' : ''} title="Move down">↓</button>`)}
+        ${post('ruledel', { id: r.id }, '<button class="btn ic bad" title="Delete rule">✕</button>')}</td></tr>`;
+  }).join('');
+
+  // The default is the LAST row of the same table — it is the bottom line of the same
+  // evaluation, and showing it anywhere else would hide that.
+  const defRow = `<tr class="defrow">
+    <td><b>Everything else</b><div class="mut" style="font-size:11px">the default — applies when no rule above matched</div></td>
+    ${CAPCOLS.map(([c]) => `<td class="tc">${
+      c !== 'read' && !t.default.read
+        ? `<span class="tgl lockedcell" title="Read is off by default, so nothing else applies"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`
+        : toggle('defcap', { cap: c }, t.default[c], ['Off', 'On'])}</td>`).join('')}
+    <td class="tc">${toggle('defstorage', {}, t.default.storage === 'perm', ['Tmp', 'Perm'])}</td>
+    <td></td></tr>`;
+
+  // --- open tabs table --------------------------------------------------------
+  const tabOrigins = [...new Set(httpTabs.map((x) => { try { return new URL(x.url).origin; } catch { return ''; } }).filter(Boolean))];
+  const colState = (cap) => {
+    const vals = httpTabs.map((x) => resolveAccess(x.url)[cap].value);
+    if (!vals.length) return 'off';
+    return vals.every(Boolean) ? 'on' : vals.some(Boolean) ? 'mixed' : 'off';
+  };
+  const triCell = (action, state3, labels) =>
+    `<span class="tri s-${state3}" title="${esc(labels[0])} / ${esc(labels[1])} — click a side to set the whole column">` +
     post(action, { value: 'off' }, `<button aria-label="all ${esc(labels[0])}"></button>`, '') +
     post(action, { value: 'on' }, `<button aria-label="all ${esc(labels[1])}"></button>`, '') +
     '<span class="knob"></span></span>';
 
-  // What state is a column in? all / none / mixed, over the tabs actually listed.
-  const columnState = (vals) => !vals.length ? 'off'
-    : vals.every(Boolean) ? 'on' : vals.some(Boolean) ? 'mixed' : 'off';
-
-  const tabOrigins = [...new Set(httpTabs.map((x) => { try { return new URL(x.url).origin; } catch { return ''; } }).filter(Boolean))];
-  const accessVals = httpTabs.map((x) => urlAllowed(x.url).allow);
-  const storeVals = httpTabs.map((x) => storageFor(x.url) === 'perm');
-  const recVals = httpTabs.map((x) => recording.has(Number(x.tabId)));
-
-  // Sites you have named explicitly, whether or not a tab is open on them right now —
-  // otherwise closing a tab would look like the setting had been revoked.
-  const entries = Object.entries(t.origins);
-  const siteRows = entries.length ? entries.map(([o, on]) => `<tr>
-      <td><code>${esc(o)}</code></td>
-      <td class="tc">${toggle('site', { origin: o }, on, ON_OFF)}</td>
-      <td class="mut" style="font-size:12px">${openTabs.some((x) => matchPattern(o, x.url || '')) ? 'open now' : '—'}
-        ${post('clear', { origin: o }, '<button class="btn" style="font-size:11px;padding:2px 7px">Use default</button>', 'margin-left:8px')}</td></tr>`).join('')
-    : `<tr><td colspan=3 class="mut">No exceptions — every site follows the default (<b>${t.default === 'on' ? 'On' : 'Off'}</b>).</td></tr>`;
-
   const tabRows = httpTabs.map((x) => {
     let origin = ''; try { origin = new URL(x.url).origin; } catch {}
-    const on = urlAllowed(x.url).allow;
-    const perm = storageFor(x.url) === 'perm';
-    const isRec = recording.has(Number(x.tabId));
-    const explicit = originSetting(origin) !== null;
+    const r = resolveAccess(x.url);
     const fav = x.favIconUrl
       ? `<img src="${esc(x.favIconUrl)}" style="width:15px;height:15px;border-radius:3px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'">` : '';
+    const cellFor = (c, labels, action) => {
+      const d = r[c];
+      if (d.locked) return locked(c === 'storage' ? d.value === 'perm' : d.value, labels, d.rule);
+      if (c !== 'read' && !r.read.value) {
+        return `<span class="tgl lockedcell" title="Read is off for this site, so nothing else can apply"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`;
+      }
+      return toggle(action, { origin }, c === 'storage' ? d.value === 'perm' : d.value, labels);
+    };
+    const src = CAPCOLS.some(([c]) => r[c].locked) || r.storage.locked
+      ? ` · <span title="Some settings come from a rule above">rule</span>` : '';
     return `<tr>
-      <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
-        <div class="mut" style="font-size:11px">${esc(origin)}${explicit ? ' · set explicitly' : ''}</div></td>
-      <td class="tc">${toggle('site', { origin }, on, ON_OFF)}</td>
-      <td class="tc">${toggle('storage', { origin }, perm, TMP_PERM)}</td>
-      <td class="tc">${toggle(isRec ? 'stoprec' : 'record', { tabId: x.tabId }, isRec, ON_OFF, 'rec')}</td></tr>`;
-  }).join('') || '<tr><td colspan=4 class="mut">No http(s) tabs open.</td></tr>';
+      <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
+        <div class="mut" style="font-size:11px">${esc(origin)}${src}</div></td>
+      ${CAPCOLS.map(([c]) => `<td class="tc">${cellFor(c, ['Off', 'On'], 'tabcap-' + c)}</td>`).join('')}
+      <td class="tc">${cellFor('storage', ['Tmp', 'Perm'], 'tabcap-storage')}</td></tr>`;
+  }).join('') || `<tr><td colspan=${CAPCOLS.length + 2} class="mut">No http(s) tabs open.</td></tr>`;
 
-  const th = (label, action, state3, labels) =>
-    `<th class="tc">${esc(label)}${httpTabs.length ? ' ' + triCell(action, state3, labels) : ''}</th>`;
+  const th = (label, hint, cap) =>
+    `<th class="tc" title="${esc(hint)}">${esc(label)}${httpTabs.length ? ' ' + triCell('allcap-' + cap, colState(cap), ['Off', 'On']) : ''}</th>`;
 
   const body = `${TGL_CSS}
-    <h2>Which tabs can be used</h2>
-    <p class="mut">Agents and scheduled modules can only act on tabs turned on here. A fresh install is <b>Off</b>.</p>
+    <h2>What agents may do, and where</h2>
+    <p class="mut">Read top to bottom: the first rule with an opinion decides, and the bottom line covers everything else.
+      <b>Read is the master</b> — with read off, nothing else applies to that site.</p>
 
-    <div class="card"><div class="row">
-      <span class="grow"><b>Default for new tabs</b>
-        <div class="mut" style="font-size:12px">What a site gets when you haven't set it either way. Individual tabs below always override this.</div></span>
-      ${toggle('default', {}, t.default === 'on', ON_OFF)}
-    </div></div>
+    <div class="card"><table>
+      <thead><tr><th>Site</th>${CAPCOLS.map(([, l, hint]) => `<th class="tc" title="${esc(hint)}">${esc(l)}</th>`).join('')}
+        <th class="tc" title="Where recordings for this site are saved">Recordings</th><th></th></tr></thead>
+      <tbody>${ruleRows}${defRow}</tbody></table>
+      ${post('addrule', {}, `<input name=pattern placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site rule</button>`, 'margin-top:10px;display:block')}
+      <div class="mut" style="font-size:12px;margin-top:6px">A rule set to <b>N/A</b> says nothing about that capability, so the next
+        matching rule — or the bottom line — decides it. Anything a rule DOES decide is locked in the tab list below.
+        Patterns match a host (<code>example.com</code>), a host wildcard (<code>*.example.com</code>), an origin
+        (<code>https://example.com</code>) or a URL prefix (<code>https://example.com/app/*</code>).</div></div>
 
     <h2>Open tabs</h2>
     <div class="card"><table>
       <thead><tr><th>Tab</th>
-        ${th('Access', 'allaccess', columnState(accessVals), ON_OFF)}
-        ${th('Recording saved to', 'allstorage', columnState(storeVals), TMP_PERM)}
-        ${th('Record', 'allrecord', columnState(recVals), ON_OFF)}</tr></thead>
+        ${CAPCOLS.map(([c, l, hint]) => th(l, hint, c)).join('')}
+        <th class="tc" title="Where this tab's recording is saved">Recordings</th></tr></thead>
       <tbody>${tabRows}</tbody></table>
-      <div class="mut" style="font-size:12px;margin-top:8px">The switch beside a column heading sets that whole column — click its left or
-        right half. It sits in the middle when the tabs disagree, and it only touches the tabs listed here, never the default.<br>
-        Recordings go to a temporary folder (<b>Tmp</b>, cleared by macOS) or are kept under <code>browser-bridge/recordings</code> (<b>Perm</b>).
-        Default for new recordings: ${post('default-storage', { value: rec.default === 'perm' ? 'tmp' : 'perm' },
-          `<button class="btn">${rec.default === 'perm' ? 'Perm' : 'Tmp'}</button>`)}</div></div>
-
-    <h2>Sites set explicitly</h2>
-    <div class="card"><table><thead><tr><th>Pattern</th><th class="tc">Access</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
-      ${post('add', {}, `<input name=origin placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site</button>`, 'margin-top:10px;display:block')}
-      <div class="mut" style="font-size:12px;margin-top:6px">Matches a host (<code>example.com</code>), a host wildcard
-        (<code>*.example.com</code>), an origin (<code>https://example.com</code>) or a URL prefix
-        (<code>https://example.com/app/*</code>). An entry here overrides the default in either direction, so you can run
-        "everything except this one" as easily as "nothing except this one".</div></div>`;
+      <div class="mut" style="font-size:12px;margin-top:8px">These are one-off choices for a site that no rule above decided.
+        A greyed switch is set by a rule — hover it to see which. The switch beside a column heading sets that whole column
+        (click its left or right half) and skips anything a rule has locked.</div></div>`;
 
   return uiChrome('Tabs', body, '/tabs');
 }
@@ -688,7 +732,7 @@ export async function uiRoutes(req, res, url) {
   if (req.method === 'GET' && p === '/tabs') { htmlRes(res, await tabsPage()); return true; }
   if (req.method === 'POST' && p === '/tabs') {
     const { form } = await readBody(req);
-    const a = form.action;
+    const a = String(form.action || '');
     const ctx = getModuleCtx();
     // The origins currently on screen — what a column-header action applies to. Read
     // fresh rather than trusting the form, so a bulk click can never act on a stale list.
@@ -699,26 +743,22 @@ export async function uiRoutes(req, res, url) {
         .filter((o) => o && /^https?:/.test(o)))];
     };
 
-    if (a === 'default') setDefaultAccess(tabAccess().default !== 'on');
-    else if (a === 'site' && form.origin) toggleOrigin(String(form.origin).trim());
-    else if (a === 'clear' && form.origin) setOriginAccess(String(form.origin).trim(), null);
-    else if (a === 'add' && String(form.origin || '').trim()) setOriginAccess(String(form.origin).trim(), true);
-    else if (a === 'storage' && form.origin) toggleStorage(String(form.origin));
-    else if (a === 'default-storage') setStorageDefault(String(form.value || 'tmp'));
-    else if (a === 'allaccess') setManyAccess(await openOrigins(), form.value === 'on');
-    else if (a === 'allstorage') setManyStorage(await openOrigins(), form.value === 'on' ? 'perm' : 'tmp');
-    else if (a === 'allrecord') {
-      let tabs = [];
-      try { tabs = (await ctx.relayCommand('tabs.list')) || []; } catch {}
-      const live = new Set((((await ctx.relayCommand('monitor.list').catch(() => [])) || [])).map((m) => Number(m.tabId)));
-      const want = form.value === 'on';
-      for (const x of tabs.filter((y) => /^https?:/.test(y.url || ''))) {
-        const isRec = live.has(Number(x.tabId));
-        if (isRec === want) continue;
-        try { await ctx.relayCommand(want ? 'monitor.start' : 'monitor.stop', { tabId: x.tabId }); } catch {}
-      }
-    } else if (a === 'record' || a === 'stoprec') {
-      try { await ctx.relayCommand(a === 'record' ? 'monitor.start' : 'monitor.stop', { tabId: Number(form.tabId) }); } catch {}
+    // Rule list
+    if (a === 'addrule') addRule(String(form.pattern || ''));
+    else if (a === 'ruledel') removeRule(String(form.id || ''));
+    else if (a === 'ruleup') moveRule(String(form.id || ''), 'up');
+    else if (a === 'ruledown') moveRule(String(form.id || ''), 'down');
+    else if (a === 'rulecap') cycleRuleCap(String(form.id || ''), String(form.cap || ''));
+    else if (a === 'rulestorage') cycleRuleStorage(String(form.id || ''));
+    // The default (bottom line)
+    else if (a === 'defcap') setDefaultCap(String(form.cap || ''), !tabAccess().default[String(form.cap || '')]);
+    else if (a === 'defstorage') setDefaultCap('storage', tabAccess().default.storage === 'perm' ? 'tmp' : 'perm');
+    // Per-tab, and per-column bulk. Both are no-ops on anything a rule has locked.
+    else if (a.startsWith('tabcap-')) toggleTabCap(String(form.origin || ''), a.slice(7));
+    else if (a.startsWith('allcap-')) {
+      const cap = a.slice(7);
+      const value = cap === 'storage' ? (form.value === 'on' ? 'perm' : 'tmp') : form.value === 'on';
+      setManyTabCaps(await openOrigins(), cap, value);
     }
     redirect(res, '/tabs'); return true;
   }
