@@ -53,17 +53,50 @@ const ICONS = { idle: pngCircle(22, [59, 130, 246]), recording: pngCircle(22, [4
 let systray = null;
 let state = 'idle';
 
+const SEP = { title: '<SEPARATOR>', tooltip: '', enabled: true };
+const item = (title, tooltip, act, extra) => ({ title, tooltip, checked: false, enabled: true, ...(extra || {}), __act: act });
+
+// Everything the menu needs from the bridge, refreshed each time it is rebuilt.
+let cfg = { origin: '', dashboardUrl: '', version: '', modules: () => [], onQuit: null, onRestart: null, onCheckUpdates: null };
+
 function menuFor(s) {
+  const mods = (() => { try { return cfg.modules() || []; } catch { return []; } })();
+  // A module's own page, plus the manage-all page. Mirrors the submenu shape of a
+  // host app's tray so the two feel like the same product.
+  const moduleItems = [
+    ...mods.map((m) => item(m.name || m.id, 'Open ' + (m.name || m.id), { open: cfg.origin + '/modules/' + m.id })),
+    ...(mods.length ? [SEP] : []),
+    item(mods.length ? 'Manage modules…' : 'No modules enabled — manage…', 'Enable or disable capability modules', { open: cfg.origin + '/modules' }),
+  ];
   return {
     icon: ICONS[s], isTemplateIcon: false, title: '',
     tooltip: 'Browser Bridge' + (s === 'recording' ? ' — recording' : ''),
     items: [
-      { title: 'Open Dashboard', tooltip: 'Recordings / activity', checked: false, enabled: true },
-      { title: 'Modules', tooltip: 'Enable/disable capability modules', checked: false, enabled: true },
-      { title: 'Rule Builder', tooltip: 'Source → Destination : Permission', checked: false, enabled: true },
-      { title: 'Quit Bridge', tooltip: 'Stop the bridge', checked: false, enabled: true },
+      // Title row: identifies the app and its version, like a macOS app menu header.
+      { title: 'Browser Bridge' + (cfg.version ? ' ' + cfg.version : ''), tooltip: 'Loopback only — nothing leaves this device', checked: false, enabled: false },
+      SEP,
+      item('Open Dashboard', 'Live activity', { open: cfg.dashboardUrl }),
+      { title: 'Modules', tooltip: 'Open a module, or manage them', checked: false, enabled: true, items: moduleItems },
+      SEP,
+      item('Check for Updates…', 'Ask GitHub for a newer release', { check: true }),
+      SEP,
+      item('Restart Browser Bridge', 'Stop and start the bridge', { restart: true }),
+      item('Quit Browser Bridge', 'Stop the bridge until you start it again', { quit: true }),
     ],
   };
+}
+
+// systray2 numbers items depth-first, parent BEFORE its children, starting at 1 — and
+// it does NOT re-register those ids when the menu is replaced via update-menu, so its
+// own lookup table goes stale the moment the module list changes. Mirror the numbering
+// here and keep our OWN id → action map, rebuilt with every menu.
+function mapActions(items, ctr, out) {
+  for (const it of items) {
+    const id = ctr.n++;
+    if (it.__act) out.set(id, it.__act);
+    if (it.items) mapActions(it.items, ctr, out);
+  }
+  return out;
 }
 
 // The systray helper is a spawned child binary; its failures surface as ASYNC
@@ -115,20 +148,50 @@ async function ensureBinExecutable() {
   } catch { /* best effort */ }
 }
 
-export async function startTray({ dashboardUrl, onQuit }) {
+// Open a URL in the user's default browser, on any platform. (`open` is macOS-only;
+// the tray also runs on Windows and Linux.)
+function openUrl(u) {
+  try {
+    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', u], { detached: true, stdio: 'ignore' }).unref();
+    else if (process.platform === 'darwin') spawn('open', [u], { detached: true, stdio: 'ignore' }).unref();
+    else spawn('xdg-open', [u], { detached: true, stdio: 'ignore' }).unref();
+  } catch { /* best effort */ }
+}
+
+let actions = new Map();
+
+export async function startTray({ origin, dashboardUrl, version, modules, onQuit, onRestart, onCheckUpdates }) {
   try {
     installTrayGuard();
     await ensureBinExecutable();
     const mod = await import('systray2');
     const SysTray = (mod.default && mod.default.default) || mod.default;
-    systray = new SysTray({ menu: menuFor('idle'), debug: false, copyDir: true });
-    const base = String(dashboardUrl).replace(/\/$/, '');
-    const openUrl = (u) => { try { spawn('open', [u]); } catch {} };
+    // `origin` is the bare http://host:port. It must NOT be derived from dashboardUrl,
+    // which now carries a module's path — concatenating onto that produced URLs like
+    // /modules/research?tab=activity/modules.
+    cfg = {
+      origin: String(origin || '').replace(/\/$/, ''),
+      dashboardUrl: dashboardUrl || origin,
+      version: version || '',
+      modules: modules || (() => []),
+      onQuit, onRestart, onCheckUpdates,
+    };
+    const menu = menuFor('idle');
+    actions = mapActions(menu.items, { n: 1 }, new Map());
+    systray = new SysTray({ menu, debug: false, copyDir: true });
     systray.onClick((action) => {
-      if (action.seq_id === 0) openUrl(dashboardUrl);
-      else if (action.seq_id === 1) openUrl(base + '/modules');
-      else if (action.seq_id === 2) openUrl(base + '/rules');
-      else if (action.seq_id === 3) { try { systray.kill(false); } catch {} if (onQuit) onQuit(); }
+      const act = actions.get(action.__id);
+      if (!act) return;
+      if (act.open) { openUrl(act.open); return; }
+      if (act.check) {
+        // Refresh the update status, then show it where it can be acted on.
+        Promise.resolve(cfg.onCheckUpdates && cfg.onCheckUpdates())
+          .catch(() => {})
+          .finally(() => openUrl(cfg.origin + '/config'));
+        return;
+      }
+      if (act.restart) { if (cfg.onRestart) cfg.onRestart(); return; }
+      if (act.quit) { try { systray.kill(false); } catch {} if (cfg.onQuit) cfg.onQuit(); }
     });
     await systray.ready();
     return true;
@@ -138,11 +201,20 @@ export async function startTray({ dashboardUrl, onQuit }) {
   }
 }
 
+// Rebuild the menu (e.g. after modules change) so the submenu stays truthful.
+export function refreshTrayMenu() {
+  if (!systray) return;
+  const menu = menuFor(state);
+  actions = mapActions(menu.items, { n: 1 }, new Map());
+  try { systray.sendAction({ type: 'update-menu', menu, seq_id: -1 }); } catch { /* tray is optional */ }
+}
+
 export function setTrayState(next) {
   const s = next === 'recording' ? 'recording' : 'idle';
   if (!systray || s === state) return;
   state = s;
-  try { systray.sendAction({ type: 'update-menu', menu: menuFor(s), seq_id: -1 }); } catch {}
+  // Rebuild through the shared path so the id → action map is regenerated with it.
+  refreshTrayMenu();
 }
 
 export function stopTray() {

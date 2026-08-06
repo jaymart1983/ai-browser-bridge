@@ -28,7 +28,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, ex
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startTray, setTrayState, stopTray } from './tray.mjs';
+import { startTray, setTrayState, stopTray, refreshTrayMenu } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle, coreToolNames } from './mcp.mjs';
 import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision, setBrowserMeta } from './pairing.mjs';
@@ -1063,13 +1063,39 @@ function quitBridge() {
   setTimeout(() => process.exit(0), 1500); // fallback if bootout didn't tear us down
 }
 
+// Tray "Restart": stop and come straight back. Under launchd/Task Scheduler the
+// supervisor restarts us, so exiting IS the restart — unlike Quit, which unregisters
+// first so nothing brings us back.
+function restartBridge() {
+  try { stopTray(); } catch {}
+  try {
+    if (process.platform === 'darwin' && typeof process.getuid === 'function') {
+      spawn('launchctl', ['kickstart', '-k', `gui/${process.getuid()}/com.browserbridge`], { detached: true, stdio: 'ignore' }).unref();
+      return; // kickstart -k terminates and relaunches us
+    }
+    if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'schtasks /end /tn BrowserBridge && schtasks /run /tn BrowserBridge'], { detached: true, stdio: 'ignore' }).unref();
+      return;
+    }
+  } catch { /* fall through */ }
+  setTimeout(() => process.exit(0), 500); // supervised elsewhere → exit and be restarted
+}
+
 server.listen(PORT, HOST, () => {
   log(`listening on http://${HOST}:${PORT}`);
   log(`  extension WS: ws://${HOST}:${PORT}${AGENT_PATH}`);
   log(`  tools POST:   http://${HOST}:${PORT}${COMMAND_PATH}`);
   log(`  perm storage: ${MON_ROOTS.perm}`);
   // Optional menubar tray (blue running / green recording). Never fatal.
-  if (!EMBEDDED) startTray({ dashboardUrl: `http://${HOST}:${PORT}${moduleDashboardPath() || '/'}`, onQuit: quitBridge })
+  if (!EMBEDDED) startTray({
+    origin: `http://${HOST}:${PORT}`,
+    dashboardUrl: `http://${HOST}:${PORT}${moduleDashboardPath() || '/'}`,
+    version: BRIDGE_VERSION ? 'v' + BRIDGE_VERSION : '',
+    modules: () => listModules().filter((m) => m.enabled).map((m) => ({ id: m.id, name: m.name })),
+    onQuit: quitBridge,
+    onRestart: restartBridge,
+    onCheckUpdates: checkForUpdate,
+  })
     .then((ok) => log(ok ? 'tray icon started' : 'tray icon unavailable (bridge runs without it)'));
   // Opt-in self-update checker (fetches origin periodically; applies only if enabled).
   if (!EMBEDDED) { try { startUpdateChecker(); } catch (e) { log('update checker not started:', e && e.message); } } // embedded: the host owns updates

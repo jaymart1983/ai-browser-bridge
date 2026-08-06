@@ -7,6 +7,7 @@ import { PERMISSIONS } from './rules.mjs';
 import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall } from './modules.mjs';
 import { listAgents, listPending, listStale, revokeAgent, removeClient } from './oauth.mjs';
 import { pairingStatus, verifyDecision } from './pairing.mjs';
+import { refreshTrayMenu } from './tray.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -495,7 +496,7 @@ export async function uiRoutes(req, res, url) {
   }
 
   if (req.method === 'GET' && p === '/modules') { htmlRes(res, modulesPage()); return true; }
-  if (req.method === 'POST' && p === '/modules/toggle') { const { form } = await readBody(req); setEnabled(String(form.id), form.enabled === '1'); redirect(res, '/modules'); return true; }
+  if (req.method === 'POST' && p === '/modules/toggle') { const { form } = await readBody(req); setEnabled(String(form.id), form.enabled === '1'); refreshTrayMenu(); redirect(res, '/modules'); return true; }
   // Uploading a module is arbitrary code execution in the bridge, and this route is
   // loopback-only but unauthenticated — so it only STAGES the install. The code is
   // written/executed exclusively after a human approves in the extension popup
@@ -512,7 +513,7 @@ export async function uiRoutes(req, res, url) {
     }
     jsonRes(res, await decideModuleInstall(String(b.reqId || ''), approve)); return true;
   }
-  if (req.method === 'POST' && p === '/modules/delete') { const { form } = await readBody(req); await deleteModule(String(form.id)); redirect(res, '/modules'); return true; }
+  if (req.method === 'POST' && p === '/modules/delete') { const { form } = await readBody(req); await deleteModule(String(form.id)); refreshTrayMenu(); redirect(res, '/modules'); return true; }
 
   if (req.method === 'GET' && p === '/rules') { htmlRes(res, rulesPage()); return true; }
   if (req.method === 'POST' && p === '/rules') {
