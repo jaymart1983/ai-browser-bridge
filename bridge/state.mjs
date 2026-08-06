@@ -26,24 +26,49 @@ export const state = {
   activeBrowser: null, // browserId that currently receives relayed commands
   autoUpdate: false, // opt-in: auto fast-forward the git clone from origin + restart
 
-  // Capability platform (the rule engine + modules).
-  modulesEnabled: [],  // [moduleId] — which capability modules are active
-  moduleOwners: {}, // moduleId -> { client_id, name, since } — who may update it unattended
+  // Which tabs may be touched at all — the one access control in 2.0, replacing the
+  // rules engine. Deny-by-default: a fresh install grants nothing.
+  tabAccess: { mode: 'none', origins: [] }, // mode: 'all' | 'selected' | 'none'
+  recording: { default: 'tmp', byOrigin: {} }, // where a tab's recording is saved
+
+  // Modules — scheduled automations, not an agent tool surface.
+  modulesEnabled: [],  // [moduleId] — which modules are active
+  moduleOwners: {},    // moduleId -> { client_id, name, since } — who may update it unattended
   modulesSeen: [],     // [moduleId] — modules discovered at least once; gates one-time autoEnable so a manual disable sticks
-  rules: [],           // ordered, top-down first-match: [{ id, action:'allow'|'deny', source, destination, permissions[], enabled, moduleId? }]
-  destinations: [],    // user-created destination artifacts: [{ id, name, patterns[] }]
-  artifacts: {},       // moduleId -> { destinations: { destId: { patterns[], contents[] } }, sources: {…} }
+  moduleRuns: {},      // moduleId -> { lastRun, lastError, lastFireKey, running } — scheduler bookkeeping
+  moduleStore: {},     // moduleId -> arbitrary JSON a module persists via ctx.store
 };
+
+// Keys retired in 2.0. Dropped on load rather than migrated: they described a rules
+// engine that no longer exists, so carrying them forward would only leave a stale
+// matrix in the state file that nothing reads and nobody can edit.
+const RETIRED = ['rules', 'destinations', 'artifacts', 'sources'];
 
 export function load() {
   try {
     if (existsSync(FILE)) {
       const d = JSON.parse(readFileSync(FILE, 'utf8'));
-      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts', 'browsers', 'moduleOwners']) if (d[k]) state[k] = d[k];
-      for (const k of ['modulesEnabled', 'modulesSeen', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
+      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'browsers', 'moduleOwners', 'moduleRuns', 'moduleStore']) if (d[k]) state[k] = d[k];
+      for (const k of ['modulesEnabled', 'modulesSeen']) if (Array.isArray(d[k])) state[k] = d[k];
+      if (d.tabAccess && typeof d.tabAccess === 'object') state.tabAccess = d.tabAccess;
+      if (d.recording && typeof d.recording === 'object') state.recording = d.recording;
       if ('pairing' in d) state.pairing = d.pairing;
       if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;
       if ('autoUpdate' in d) state.autoUpdate = !!d.autoUpdate;
+      // A 1.x file that granted every tab through the old research destination shouldn't
+      // silently become deny-all on upgrade — carry that one decision across, since it
+      // was an explicit user choice and losing it looks like the bridge broke.
+      if (!d.tabAccess && d.artifacts) {
+        const contents = Object.values(d.artifacts)
+          .flatMap((a) => Object.values((a && a.destinations) || {}))
+          .flatMap((x) => (x && Array.isArray(x.contents) ? x.contents : []));
+        if (contents.length) {
+          state.tabAccess = contents.includes('*')
+            ? { mode: 'all', origins: [] }
+            : { mode: 'selected', origins: [...new Set(contents)] };
+        }
+      }
+      if (RETIRED.some((k) => k in d)) queueMicrotask(save); // rewrite the file without them
     }
   } catch { /* start empty */ }
   return state;

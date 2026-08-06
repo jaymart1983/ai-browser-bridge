@@ -1,10 +1,14 @@
 // ui.mjs — the bridge's web control plane. A left-nav shell splits BRIDGE items
-// (Config, Modules, Rules) from MODULE items (each enabled module's own page).
+// (Config, Tabs, Modules) from MODULE items (each enabled module's own page).
 // Loopback-trust, server-rendered, no build step.
 
 import { state, save } from './state.mjs';
-import { PERMISSIONS } from './rules.mjs';
-import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall, moduleOwner } from './modules.mjs';
+import {
+  tabAccess, setTabAccess, toggleOrigin, urlAllowed, matchPattern,
+  recordingCfg, storageFor, setStorageDefault, toggleStorage,
+} from './tabaccess.mjs';
+import { listModules, setEnabled, getModule, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall, moduleOwner } from './modules.mjs';
+import { runModuleNow, isRunning } from './automation.mjs';
 import { listAgents, listPending, listStale, revokeAgent, removeClient } from './oauth.mjs';
 import { pairingStatus, verifyDecision } from './pairing.mjs';
 import { refreshTrayMenu } from './tray.mjs';
@@ -44,7 +48,7 @@ function htmlRes(res, body, status = 200) { res.writeHead(status, { 'content-typ
 function jsonRes(res, obj, status = 200) { const b = JSON.stringify(obj); res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(b), 'cache-control': 'no-store' }); res.end(b); }
 function redirect(res, to) { res.writeHead(302, { location: to, 'cache-control': 'no-store' }); res.end(); }
 
-const bridgeNav = () => [{ label: 'Config', href: '/config' }, { label: 'Modules', href: '/modules' }, { label: 'Rules', href: '/rules' }];
+const bridgeNav = () => [{ label: 'Config', href: '/config' }, { label: 'Modules', href: '/modules' }, { label: 'Tabs', href: '/tabs' }];
 const moduleNav = () => allNavLinks().map((l) => ({ label: l.label, href: l.href, moduleId: l.moduleId }));
 
 // Shared shell: left nav (Bridge + Modules sections) + main content.
@@ -339,49 +343,169 @@ function configPage() {
     </script>`, '/config');
 }
 
-// Built-in page for a module that ships no UI of its own. Everything shown is what the
-// module registered with the bridge, so it stays accurate without the module doing
-// anything: what it can do, where it may act, and which rules govern it.
+// --- Tabs: the one access control in 2.0 -------------------------------------
+// An authorized agent gets every primitive; what it does NOT get is a tab you haven't
+// enabled here. Modules are held to the same line. This page is the whole policy — no
+// matrix of agents × destinations × verbs to maintain.
+async function tabsPage() {
+  const t = tabAccess();
+  const rec = recordingCfg();
+  const ctx = getModuleCtx();
+
+  let openTabs = [];
+  try { openTabs = (await ctx.relayCommand('tabs.list')) || []; } catch {}
+  let recording = new Set();
+  try { recording = new Set((((await ctx.relayCommand('monitor.list')) || [])).map((m) => Number(m.tabId))); } catch {}
+  const httpTabs = openTabs.filter((x) => /^https?:/.test(x.url || ''));
+
+  const post = (action, extra, inner, style = '') =>
+    `<form method=POST action="/tabs" style="display:inline-block;margin:0;${style}"><input type=hidden name=action value="${action}">` +
+    Object.entries(extra).map(([k, v]) => `<input type=hidden name="${k}" value="${esc(v)}">`).join('') + inner + '</form>';
+  const toggle = (action, extra, on, cls = '') =>
+    post(action, extra, `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} onchange="this.form.submit()"><span class="slider"></span></label>`, 'vertical-align:middle');
+  const dead = (on) => `<label class="switch"><input type=checkbox ${on ? 'checked' : ''} disabled><span class="slider"></span></label>`;
+  const storLbl = (perm) => `<span class="mut" style="font-size:11px;margin-left:6px">${perm ? 'Perm' : 'Tmp'}</span>`;
+
+  const MODES = [
+    ['all', 'All tabs', 'Everything you have open, and anything you open later.'],
+    ['selected', 'Selected sites', 'Only the sites listed below.'],
+    ['none', 'Off', 'Nothing. Agents and modules are refused every tab.'],
+  ];
+  const modeCards = MODES.map(([m, label, hint]) => post('mode', { mode: m },
+    `<button class="btn ${t.mode === m ? 'on' : ''}" style="text-align:left;width:100%;padding:10px 12px">
+       <b>${esc(label)}</b><div class="mut" style="font-size:12px;font-weight:400;margin-top:2px">${esc(hint)}</div></button>`,
+    'flex:1;min-width:180px')).join('');
+
+  // Rows for the sites you've named, whether or not a tab is open on them right now —
+  // otherwise closing a tab would look like the permission had been revoked.
+  const siteRows = t.origins.length ? t.origins.map((o) => `<tr>
+      <td><code>${esc(o)}</code></td>
+      <td>${toggle('toggle', { origin: o }, true)}</td>
+      <td class="mut" style="font-size:12px">${openTabs.some((x) => matchPattern(o, x.url || '')) ? 'open now' : '—'}</td></tr>`).join('')
+    : '<tr><td colspan=3 class="mut">No sites enabled. Add one below, or from an open tab.</td></tr>';
+
+  const tabRows = httpTabs.map((x) => {
+    let origin = ''; try { origin = new URL(x.url).origin; } catch {}
+    const on = urlAllowed(x.url).allow;
+    const perm = storageFor(x.url) === 'perm';
+    const isRec = recording.has(Number(x.tabId));
+    const fav = x.favIconUrl
+      ? `<img src="${esc(x.favIconUrl)}" style="width:15px;height:15px;border-radius:3px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'">` : '';
+    return `<tr>
+      <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
+        <div class="mut" style="font-size:11px">${esc(origin)}</div></td>
+      <td>${t.mode === 'all' ? dead(true) + '<span class="mut" style="font-size:11px;margin-left:6px">via All</span>'
+           : t.mode === 'none' ? dead(false) + '<span class="mut" style="font-size:11px;margin-left:6px">off</span>'
+           : toggle('toggle', { origin }, on)}</td>
+      <td>${toggle('storage', { origin }, perm)}${storLbl(perm)}</td>
+      <td>${toggle(isRec ? 'stoprec' : 'record', { tabId: x.tabId }, isRec, 'rec')}</td></tr>`;
+  }).join('') || '<tr><td colspan=4 class="mut">No http(s) tabs open.</td></tr>';
+
+  const body = `
+    <h2>Which tabs can be used</h2>
+    <p class="mut">Agents and scheduled modules can only act on tabs allowed here. A fresh install is <b>Off</b>.</p>
+    <div class="card"><div class="row" style="gap:8px;flex-wrap:wrap">${modeCards}</div></div>
+
+    <h2>Enabled sites</h2>
+    <div class="card"><table><thead><tr><th>Pattern</th><th>Enabled</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
+      ${post('add', {}, `<input name=origin placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site</button>`, 'margin-top:10px;display:block')}
+      <div class="mut" style="font-size:12px;margin-top:6px">Matches a host (<code>example.com</code>), a host wildcard
+        (<code>*.example.com</code>), an origin (<code>https://example.com</code>) or a URL prefix
+        (<code>https://example.com/app/*</code>). Adding a site switches you to <b>Selected sites</b>.</div></div>
+
+    <h2>Open tabs</h2>
+    <div class="card"><table>
+      <thead><tr><th>Tab</th><th>Access</th><th>Recording saved to</th><th>Record</th></tr></thead>
+      <tbody>${tabRows}</tbody></table>
+      <div class="mut" style="font-size:12px;margin-top:8px">Recordings go to a temporary folder by default
+        (<b>Tmp</b>, cleared by macOS) or are kept under <code>browser-bridge/recordings</code> (<b>Perm</b>).
+        Default for new tabs: ${post('default', { value: rec.default === 'perm' ? 'tmp' : 'perm' },
+          `<button class="btn">${rec.default === 'perm' ? 'Perm' : 'Tmp'}</button>`)}</div></div>`;
+
+  return uiChrome('Tabs', body, '/tabs');
+}
+
+// Built-in page for a module that ships no UI of its own. A 2.0 module is an automation,
+// so what matters is when it runs, whether it waits for a human, what it does while it
+// runs, and who owns it — answerable without reading its code.
 function defaultModulePage(mod) {
-  const dests = allDestinations().filter((d) => d.moduleId === mod.id);
-  const rules = (state.rules || []).filter((r) => r.moduleId === mod.id);
-  const tools = Object.entries(mod.tools || {});
-  const row = (k, v) => `<tr><td style="width:150px" class="mut">${esc(k)}</td><td>${v}</td></tr>`;
+  const acts = Array.isArray(mod.actions) ? mod.actions : [];
+  const owner = moduleOwner(mod.id);
+  const run = (state.moduleRuns || {})[mod.id] || {};
+  const row = (k, v) => `<tr><td style="width:170px" class="mut">${esc(k)}</td><td>${v}</td></tr>`;
 
   const about = `<div class="card"><table>
     ${row('Module id', `<code>${esc(mod.id)}</code>`)}
     ${mod.version ? row('Version', esc(mod.version)) : ''}
     ${row('Status', `<span class="tag on">enabled</span>`)}
-    ${mod.capabilities && mod.capabilities.length ? row('Extension capabilities', mod.capabilities.map((c) => `<span class="tag">${esc(c)}</span>`).join(' ')) : ''}
+    ${row('Owner', owner && owner.clientName
+      ? `${esc(owner.clientName)} <span class="mut" style="font-size:11px">(updates unattended)</span>`
+      : '<span class="mut">installed by hand — no agent owns it</span>')}
   </table>${mod.description ? `<div class="mut" style="font-size:12px;margin-top:8px">${esc(mod.description)}</div>` : ''}</div>`;
 
-  const toolRows = tools.length ? tools.map(([name, t]) => `<tr>
-      <td><code>${esc(name)}</code>${t.verb ? ` <span class="tag">${esc(t.verb)}</span>` : ''}</td>
-      <td class="mut" style="font-size:12px">${esc(String(t.description || '').split('\n')[0]).slice(0, 200)}</td></tr>`).join('')
-    : '<tr><td colspan=2 class="mut">This module provides no tools.</td></tr>';
+  const schedule = `<div class="card"><table>
+    ${row('Trigger', describeSchedule(mod.schedule))}
+    ${row('Waits for you', mod.authRequired
+      ? '<span class="tag on">yes</span> <span class="mut" style="font-size:12px">armed at the scheduled time, held until you are at the browser</span>'
+      : '<span class="tag off">no</span> <span class="mut" style="font-size:12px">runs unattended</span>')}
+    ${isRunning(mod.id) ? row('Right now', `<span class="tag on">running</span>${run.waitingFor
+      ? ` <span class="mut">waiting for you — ${esc(run.waitingFor.message || 'sign in to continue')}</span>` : ''}`) : ''}
+    ${row('Last run', run.lastRun
+      ? `${esc(fmtWhen(run.lastRun))} — ${run.lastError
+          ? `<span class="tag deny">failed</span> <span class="mut">${esc(String(run.lastError).slice(0, 200))}</span>`
+          : '<span class="tag on">ok</span>'}`
+      : '<span class="mut">never</span>')}
+    ${row('Next run', mod.schedule ? esc(describeNextRun(mod.schedule)) : '<span class="mut">not scheduled — run it by hand</span>')}
+  </table>
+  <form method="post" action="/modules/run" style="margin-top:10px">
+    <input type="hidden" name="id" value="${esc(mod.id)}">
+    <button class="btn">Run now</button>
+    <span class="mut" style="font-size:12px;margin-left:8px">Runs immediately, ignoring the schedule. The auth gate still applies.</span>
+  </form></div>`;
 
-  const destRows = dests.length ? dests.map((d) => `<tr>
-      <td><b>${esc(d.name || d.id)}</b><div class="mut" style="font-size:11px"><code>${esc(d.id)}</code></div></td>
-      <td>${(d.patterns || []).length
-        ? (d.patterns || []).map((x) => `<code>${esc(x)}</code>`).join(' ')
-        : '<span class="tag off">no patterns — rules using this destination deny everything</span>'}</td></tr>`).join('')
-    : '<tr><td colspan=2 class="mut">This module declares no destinations.</td></tr>';
-
-  const ruleRows = rules.length ? rules.map((r) => `<tr>
-      <td><span class="tag ${r.action === 'deny' ? 'deny' : 'allow'}">${r.action === 'deny' ? 'deny' : 'allow'}</span> ${esc(r.source)}</td>
-      <td>→ ${esc(r.destination)}</td>
-      <td>${(r.permissions || []).map((x) => `<span class="tag">${esc(x)}</span>`).join(' ')}</td></tr>`).join('')
-    : '<tr><td colspan=3 class="mut">No rules reference this module.</td></tr>';
+  const actRows = acts.length
+    ? acts.map((a) => `<span class="tag">${esc(a)}</span>`).join(' ')
+    : '<span class="mut">declares nothing — it will be refused if it tries to act</span>';
 
   const body = `${about}
-    <h2>Tools <span class="mut" style="font-size:12px;font-weight:400">exposed to authorized agents over MCP</span></h2>
-    <div class="card"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>${toolRows}</tbody></table></div>
-    <h2>Destinations <span class="mut" style="font-size:12px;font-weight:400">where this module's rules may apply</span></h2>
-    <div class="card"><table><thead><tr><th>Destination</th><th>Patterns</th></tr></thead><tbody>${destRows}</tbody></table></div>
-    <h2>Rules</h2>
-    <div class="card"><table><thead><tr><th>Source</th><th>Destination</th><th>Permissions</th></tr></thead><tbody>${ruleRows}</tbody></table>
-      <div class="mut" style="font-size:12px;margin-top:8px">Edit these in the <a href="/rules">Rule builder</a>. This module ships no settings page of its own — everything above is what it registered with the bridge.</div></div>`;
+    <h2>Schedule</h2>
+    ${schedule}
+    <h2>What it does <span class="mut" style="font-size:12px;font-weight:400">declared in its manifest</span></h2>
+    <div class="card">${actRows}
+      <div class="mut" style="font-size:12px;margin-top:8px">A module can only reach tabs you have enabled under
+        <a href="/tabs">Tabs</a> — the same limit that applies to agents. This module ships no settings page of its
+        own; everything above is what it registered with the bridge.</div></div>`;
   return moduleShell(mod, { header: 'Provided by the module — no custom settings page.', body });
+}
+
+const DAY_ORDER = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function describeSchedule(s) {
+  if (!s || !s.at) return '<span class="mut">no schedule — only runs when you press Run now</span>';
+  const days = Array.isArray(s.days) && s.days.length ? s.days.map((d) => String(d).toUpperCase()) : DAY_ORDER;
+  const label = days.length === 7 ? 'every day'
+    : days.length === 5 && ['MON', 'TUE', 'WED', 'THU', 'FRI'].every((d) => days.includes(d)) ? 'weekdays'
+    : days.join(', ');
+  return `<b>${esc(s.at)}</b> <span class="mut">${esc(label)}</span>`;
+}
+
+// Same arithmetic the scheduler uses, in words: the next local time-of-day on an allowed day.
+function describeNextRun(s) {
+  if (!s || !s.at) return 'not scheduled';
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s.at));
+  if (!m) return 'invalid schedule';
+  const days = Array.isArray(s.days) && s.days.length ? s.days.map((d) => String(d).toUpperCase()) : DAY_ORDER;
+  const now = new Date();
+  for (let i = 0; i < 8; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, Number(m[1]), Number(m[2]), 0, 0);
+    if (d > now && days.includes(DAY_ORDER[d.getDay()])) return fmtWhen(d.getTime());
+  }
+  return 'not scheduled';
+}
+
+function fmtWhen(ts) {
+  try { return new Date(ts).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  catch { return String(ts); }
 }
 
 function modulesPage() {
@@ -425,66 +549,6 @@ function modulesPage() {
   return uiChrome('Modules', `<h2>Capability modules</h2><p class="mut">Each module adds artifacts, tools, and rules. Nothing is permitted until a module is enabled and a rule allows it.</p>${rows}${upload}`, '/modules');
 }
 
-function rulesPage() {
-  const sources = allSources();
-  const dests = allDestinations();
-  const rules = state.rules || [];
-  const nameOfDest = (id) => (dests.find((d) => d.id === id) || {}).name || id;
-  const ruleRows = rules.length ? rules.map((r, i) => {
-    const deny = r.action === 'deny';
-    return `<tr>
-      <td class="mut" style="width:22px;text-align:center">${i + 1}</td>
-      <td><span class="tag ${deny ? 'deny' : 'allow'}">${deny ? 'DENY' : 'ALLOW'}</span></td>
-      <td>${esc(r.source)}</td>
-      <td>${esc(nameOfDest(r.destination))}</td>
-      <td>${(r.permissions || []).map((p) => `<span class="tag">${esc(p)}</span>`).join(' ')}</td>
-      <td><span class="tag ${r.enabled !== false ? 'on' : 'off'}">${r.enabled !== false ? 'on' : 'off'}</span></td>
-      <td class="row" style="gap:4px">
-        <form method=POST action="/rules"><input type=hidden name=action value=moveup><input type=hidden name=id value="${esc(r.id)}"><button title="Move up"${i === 0 ? ' disabled' : ''}>↑</button></form>
-        <form method=POST action="/rules"><input type=hidden name=action value=movedown><input type=hidden name=id value="${esc(r.id)}"><button title="Move down"${i === rules.length - 1 ? ' disabled' : ''}>↓</button></form>
-        <form method=POST action="/rules"><input type=hidden name=action value=toggle><input type=hidden name=id value="${esc(r.id)}"><button>${r.enabled !== false ? 'Disable' : 'Enable'}</button></form>
-        <form method=POST action="/rules"><input type=hidden name=action value=delete><input type=hidden name=id value="${esc(r.id)}"><button class=bad>Delete</button></form>
-      </td></tr>`;
-  }).join('') : '<tr><td colspan=7 class="mut">No rules yet. Nothing is permitted until a rule allows it.</td></tr>';
-  const srcOpts = sources.map((s) => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
-  const dstOpts = dests.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}${d.user ? ' (custom)' : ''}</option>`).join('');
-  const permChks = PERMISSIONS.map((p) => `<label class=chk><input type=checkbox name=permissions value="${p}">${p}</label>`).join('');
-
-  const destRows = dests.length ? dests.map((d) => `<tr>
-      <td><b>${esc(d.name)}</b> ${d.user ? '<span class="tag">custom</span>' : `<span class="tag on">${esc(d.moduleId || 'module')}</span>`}</td>
-      <td class="mut" style="font-size:12px">${(d.patterns || []).map((p) => `<code>${esc(p)}</code>`).join(' ') || '<span class="mut">(empty)</span>'}</td>
-      <td>${d.user ? `<form method=POST action="/destinations"><input type=hidden name=action value=delete><input type=hidden name=id value="${esc(d.id)}"><button class=bad>Delete</button></form>` : '<span class="mut" style="font-size:11px">from module</span>'}</td>
-    </tr>`).join('') : '<tr><td colspan=3 class="mut">No destinations yet.</td></tr>';
-
-  return uiChrome('Rules', `
-    <h2>Rules <span class="mut" style="font-size:12px;font-weight:400">evaluated top-down, first match wins · deny-by-default</span></h2>
-    <p class="mut" style="font-size:12px;margin-top:0">Put a rule higher to make it supersede the ones below. A <b>deny</b> at the top blocks everything under it; an <b>allow</b> at the top grants past later denies.</p>
-    <div class="card"><table><thead><tr><th>#</th><th>Action</th><th>Source</th><th>Destination</th><th>Permissions</th><th>On</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table></div>
-    <h2>Add a rule</h2>
-    <form method=POST action="/rules" class="card">
-      <input type=hidden name=action value=add>
-      <div class="row" style="margin-bottom:10px">
-        <label>Effect <select name=effect><option value=allow>allow</option><option value=deny>deny</option></select></label>
-        <label>Source <select name=source>${srcOpts}</select></label>
-        <label>Destination <select name=destination>${dstOpts || '<option value="">(create one below)</option>'}</select></label>
-      </div>
-      <div style="margin-bottom:10px">${permChks}</div>
-      <button class=primary type=submit>Add rule</button>
-      <span class="mut" style="font-size:12px;margin-left:8px">New rules are added at the bottom; reorder with ↑ ↓.</span>
-    </form>
-
-    <h2>Destinations</h2>
-    <p class="mut" style="font-size:12px;margin-top:0">A destination is a named set of origin / URL patterns. Modules provide some; you can define your own below. Patterns: <code>*.okta.com</code>, <code>https://acme.com/app/*</code>, bare host, or <code>*</code> for everything.</p>
-    <div class="card"><table><thead><tr><th>Name</th><th>Patterns</th><th></th></tr></thead><tbody>${destRows}</tbody></table></div>
-    <h2>Create a destination</h2>
-    <form method=POST action="/destinations" class="card">
-      <input type=hidden name=action value=add>
-      <div class="row" style="margin-bottom:10px"><label>Name <input type=text name=name placeholder="e.g. Bank sites" style="width:220px"></label></div>
-      <div style="margin-bottom:10px"><label style="display:block;margin-bottom:4px">Patterns (one per line or space-separated)</label>
-        <textarea name=patterns rows=3 placeholder="*.chase.com&#10;https://www.bankofamerica.com/*" style="width:100%;background:var(--inp);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font:12px ui-monospace,Menlo,monospace"></textarea></div>
-      <button class=primary type=submit>Create destination</button>
-    </form>`, '/rules');
-}
 
 // --- Router (returns true if handled) ----------------------------------------
 export async function uiRoutes(req, res, url) {
@@ -525,44 +589,32 @@ export async function uiRoutes(req, res, url) {
   }
   if (req.method === 'POST' && p === '/modules/delete') { const { form } = await readBody(req); await deleteModule(String(form.id)); refreshTrayMenu(); redirect(res, '/modules'); return true; }
 
-  if (req.method === 'GET' && p === '/rules') { htmlRes(res, rulesPage()); return true; }
-  if (req.method === 'POST' && p === '/rules') {
+  // Run an automation on demand. The auth gate still applies inside run(), so this is
+  // "start now", not "bypass the rules".
+  if (req.method === 'POST' && p === '/modules/run') {
     const { form } = await readBody(req);
-    const rules = state.rules;
-    if (form.action === 'add') {
-      const perms = [].concat(form.permissions || []).filter(Boolean);
-      const action = form.effect === 'deny' ? 'deny' : 'allow';
-      const rid = 'rule-' + Date.now().toString(36) + '-' + (String(form.source || 'x')).replace(/\W+/g, '').slice(0, 8);
-      rules.push({ id: rid, action, source: String(form.source), destination: String(form.destination || ''), permissions: perms, enabled: true }); save();
-    } else if (form.action === 'delete') { state.rules = rules.filter((r) => r.id !== form.id); save(); }
-    else if (form.action === 'toggle') { const r = rules.find((x) => x.id === form.id); if (r) { r.enabled = r.enabled === false; save(); } }
-    else if (form.action === 'moveup' || form.action === 'movedown') {
-      const i = rules.findIndex((r) => r.id === form.id);
-      const j = form.action === 'moveup' ? i - 1 : i + 1;
-      if (i >= 0 && j >= 0 && j < rules.length) { const t = rules[i]; rules[i] = rules[j]; rules[j] = t; save(); }
-    }
-    redirect(res, '/rules'); return true;
-  }
-  if (req.method === 'POST' && p === '/destinations') {
-    const { form } = await readBody(req);
-    state.destinations = state.destinations || [];
-    if (form.action === 'add' && String(form.name || '').trim()) {
-      const patterns = String(form.patterns || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-      const base = String(form.name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'dest';
-      let id = 'dest-' + base, n = 2;
-      while (state.destinations.find((d) => d.id === id)) id = 'dest-' + base + '-' + n++;
-      state.destinations.push({ id, name: String(form.name).trim(), patterns }); save();
-    } else if (form.action === 'delete' && form.id) {
-      state.destinations = state.destinations.filter((d) => d.id !== form.id); save();
-    }
-    redirect(res, '/rules'); return true;
+    const id = String(form.id || '');
+    runModuleNow(id).catch(() => {});
+    redirect(res, '/modules/' + id); return true;
   }
 
-  if (req.method === 'POST' && p === '/artifacts/populate') {
+  if (req.method === 'GET' && p === '/tabs') { htmlRes(res, await tabsPage()); return true; }
+  if (req.method === 'POST' && p === '/tabs') {
     const { form } = await readBody(req);
-    const mod = getModule(String(form.moduleId));
-    if (mod && mod.populate) { try { await mod.populate(getModuleCtx()); } catch {} }
-    redirect(res, form.back || ('/modules/' + (form.moduleId || ''))); return true;
+    const a = form.action;
+    if (a === 'mode') setTabAccess({ mode: String(form.mode || 'none') });
+    else if (a === 'toggle' && form.origin) toggleOrigin(String(form.origin).trim());
+    else if (a === 'add' && String(form.origin || '').trim()) {
+      const t = tabAccess();
+      const o = String(form.origin).trim();
+      if (!t.origins.includes(o)) setTabAccess({ mode: 'selected', origins: t.origins.concat([o]) });
+    } else if (a === 'storage' && form.origin) toggleStorage(String(form.origin));
+    else if (a === 'default') setStorageDefault(String(form.value || 'tmp'));
+    else if (a === 'record' || a === 'stoprec') {
+      const ctx = getModuleCtx();
+      try { await ctx.relayCommand(a === 'record' ? 'monitor.start' : 'monitor.stop', { tabId: Number(form.tabId) }); } catch {}
+    }
+    redirect(res, '/tabs'); return true;
   }
 
   const m = /^\/modules\/([a-z0-9_-]+)(\/.*)?$/i.exec(p);

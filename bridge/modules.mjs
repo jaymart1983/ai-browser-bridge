@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { state, save } from './state.mjs';
-import { setDestination, removeDestinationsByModule, getDestinations } from './rules.mjs';
+
 
 const MODULES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'modules');
 const registry = new Map(); // id -> manifest
@@ -43,14 +43,6 @@ export async function loadModules() {
   // verb) would never take effect on an existing install, because baseRules used to be
   // seeded only on the disabled→enabled transition. Only rules whose id is absent are
   // added, so a rule the user edited or deleted is never resurrected or overwritten.
-  let rulesAdded = 0;
-  for (const id of state.modulesEnabled) {
-    const mod = registry.get(id);
-    if (!mod) continue;
-    registerDestinations(mod);
-    rulesAdded += seedBaseRules(mod);
-  }
-  if (rulesAdded) { console.log(`[modules] seeded ${rulesAdded} new base rule(s) from module updates`); save(); }
   // One-time auto-enable: a module declares `autoEnable: true` in its own manifest to
   // go live on first install without a manual toggle. Purely module-driven — the bridge
   // holds no module names. Gated on `modulesSeen` so it fires ONCE per module: if the
@@ -206,10 +198,7 @@ export async function uploadModule(name, code) {
 export async function deleteModule(id) {
   if (!registry.has(id)) return { ok: false, error: 'no such module' };
   if (isEnabled(id)) setEnabled(id, false);
-  state.rules = (state.rules || []).filter((r) => r.moduleId !== id);
-  delete state.artifacts[id];
   state.modulesEnabled = state.modulesEnabled.filter((x) => x !== id);
-  removeDestinationsByModule(id);
   save();
   const file = files.get(id);
   if (file) { try { unlinkSync(file); } catch {} }
@@ -225,26 +214,9 @@ export function listModules() {
 }
 
 // Effective destination pattern-set = module-static patterns ∪ user-curated contents.
-function registerDestinations(mod) {
-  const art = (state.artifacts[mod.id] && state.artifacts[mod.id].destinations) || {};
-  for (const d of (mod.artifacts && mod.artifacts.destinations) || []) {
-    const contents = (art[d.id] && art[d.id].contents) || [];
-    setDestination(d.id, { name: d.name, moduleId: mod.id, patterns: [...(d.patterns || []), ...contents] });
-  }
-}
 
 // Add any of the module's baseRules that aren't in state yet. Additive only — an
 // existing rule id is left exactly as the user has it. Returns how many were added.
-function seedBaseRules(mod) {
-  let added = 0;
-  for (const r of mod.baseRules || []) {
-    if (!state.rules.find((x) => x.id === r.id)) {
-      state.rules.push({ ...r, moduleId: mod.id, enabled: r.enabled !== false });
-      added++;
-    }
-  }
-  return added;
-}
 
 export function setEnabled(id, enabled) {
   const mod = registry.get(id);
@@ -252,70 +224,17 @@ export function setEnabled(id, enabled) {
   const cur = isEnabled(id);
   if (enabled && !cur) {
     state.modulesEnabled.push(id);
-    registerDestinations(mod);
-    seedBaseRules(mod);
     if (mod.onEnable && _ctx) { try { mod.onEnable(_ctx); } catch (e) { console.error('[modules] onEnable', e && e.message); } }
   } else if (!enabled && cur) {
     state.modulesEnabled = state.modulesEnabled.filter((x) => x !== id);
-    removeDestinationsByModule(mod.id); // rules stay in state but can no longer match
     if (mod.onDisable && _ctx) { try { mod.onDisable(_ctx); } catch (e) { console.error('[modules] onDisable', e && e.message); } }
   }
   save();
   return { ok: true };
 }
 
-// Re-register a module's destinations after its dynamic contents change
-// (populate / user curation writes into state.artifacts, then calls this).
-export function refreshModuleDestinations(id) {
-  const mod = registry.get(id);
-  if (mod && isEnabled(id)) registerDestinations(mod);
-}
 
-// Set the curated contents for a dynamic destination, persist, and re-register.
-export function setDestinationContents(moduleId, destId, contents) {
-  state.artifacts[moduleId] = state.artifacts[moduleId] || { destinations: {} };
-  state.artifacts[moduleId].destinations = state.artifacts[moduleId].destinations || {};
-  state.artifacts[moduleId].destinations[destId] = { contents: Array.isArray(contents) ? contents : [] };
-  save();
-  refreshModuleDestinations(moduleId);
-  return { ok: true };
-}
 
-// --- Aggregators for the MCP surface + rule-builder UI -----------------------
-export function allModuleTools() {
-  const tools = {};
-  for (const id of state.modulesEnabled) {
-    const mod = registry.get(id);
-    if (mod && mod.tools) for (const [name, t] of Object.entries(mod.tools)) tools[name] = { ...t, moduleId: id };
-  }
-  return tools;
-}
-export function allSources() {
-  const out = [{ id: 'any', name: 'Any Agent', kind: 'static' }];
-  const seen = new Set(['Any Agent']);
-  for (const id of state.modulesEnabled) {
-    const mod = registry.get(id);
-    for (const s of (mod && mod.artifacts && mod.artifacts.sources) || []) {
-      if (!seen.has(s.name)) { seen.add(s.name); out.push({ ...s, moduleId: id }); }
-    }
-  }
-  return out;
-}
-export function allDestinations() { return getDestinations(); }
-
-// Extension capabilities in use by ENABLED modules. Core MCP tools that surface an
-// extension capability (annotate, record, …) are only advertised/callable while some
-// enabled module declares it via `capabilities: ['annotate']` in its manifest — the
-// module is also what seeds the rule objects that allow the verb, so without one the
-// tool could never pass policy anyway. Declaring the capability = owning its rules.
-export function activeCapabilities() {
-  const out = new Set();
-  for (const id of state.modulesEnabled) {
-    const mod = registry.get(id);
-    for (const c of (mod && mod.capabilities) || []) out.add(String(c));
-  }
-  return out;
-}
 
 // Server-level MCP `instructions` (returned on initialize) — how an agent should use
 // this bridge. A module contributes its own section via an `instructions` string (or a
@@ -423,3 +342,136 @@ export function allNavLinks() {
   }
   return out;
 }
+
+// --- Module authoring API (exposed to agents as module_* MCP tools) ----------
+// Agents write modules; they do not call them. Validation here is deliberately
+// specific: a vague "invalid module" costs an agent a round trip and it will guess
+// wrong. Every rejection names the field and what was expected.
+const DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+const ACTIONS = ['read', 'write', 'control', 'record', 'annotate'];
+
+function validateManifest(m, expectedId) {
+  const e = [];
+  if (!m || typeof m !== 'object') return ['the file must `export default` a manifest object'];
+  if (typeof m.id !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(m.id)) e.push('id: required, must match [a-z0-9_-]{1,64}');
+  else if (expectedId && m.id !== expectedId) e.push(`id: manifest declares "${m.id}" but you asked to write "${expectedId}" — they must match`);
+  if (typeof m.name !== 'string' || !m.name.trim()) e.push('name: required, non-empty string');
+  if (typeof m.version !== 'string' || !m.version.trim()) e.push('version: required, e.g. "1.0.0" — bump it on every change so the user can see what is installed');
+  if (m.schedule != null) {
+    const s = m.schedule;
+    if (typeof s !== 'object') e.push('schedule: must be an object like { at: "09:00", days: ["MON"] }');
+    else {
+      if (typeof s.at !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(s.at)) e.push(`schedule.at: must be 24h "HH:MM"${s.at ? `, got ${JSON.stringify(s.at)}` : ''}`);
+      if (s.days != null) {
+        if (!Array.isArray(s.days) || !s.days.length) e.push('schedule.days: must be a non-empty array');
+        else { const bad = s.days.filter((d) => !DAYS.includes(String(d).toUpperCase())); if (bad.length) e.push(`schedule.days: unknown ${JSON.stringify(bad)} — use ${DAYS.join('|')}`); }
+      }
+    }
+  }
+  if (m.authRequired != null && typeof m.authRequired !== 'boolean') e.push('authRequired: must be true or false');
+  if (m.actions != null) {
+    if (!Array.isArray(m.actions)) e.push(`actions: must be an array from ${ACTIONS.join('|')}`);
+    else { const bad = m.actions.filter((a) => !ACTIONS.includes(a)); if (bad.length) e.push(`actions: unknown ${JSON.stringify(bad)} — allowed: ${ACTIONS.join(', ')}`); }
+  }
+  if (m.schedule && typeof m.run !== 'function') e.push('run: a scheduled module must define `async run(ctx)` ON THE MANIFEST (not a named export)');
+  if (m.run != null && typeof m.run !== 'function') e.push('run: must be an async function');
+  if (m.tools) e.push('tools: modules no longer expose tools to agents (2.0). Move that logic into run(), or use the core browser_* tools directly.');
+  return e;
+}
+
+// Load a candidate in isolation so a broken module is rejected BEFORE it can replace a
+// working one. Written to a scratch file because ESM import needs a real path.
+async function parseCandidate(code) {
+  mkdirSync(MODULES_DIR, { recursive: true });
+  const tmp = join(MODULES_DIR, `.candidate-${randomBytes(6).toString('hex')}.mjs`);
+  try {
+    writeFileSync(tmp, String(code));
+    const mod = (await import(pathToFileURL(tmp).href + '?v=' + Date.now())).default;
+    return { ok: true, manifest: mod };
+  } catch (err) {
+    return { ok: false, error: `the module failed to load: ${(err && err.message) || err}` };
+  } finally { try { unlinkSync(tmp); } catch { /* already gone */ } }
+}
+
+function moduleSummary(m) {
+  const own = moduleOwner(m.id);
+  const runs = (state.moduleRuns && state.moduleRuns[m.id]) || {};
+  return {
+    id: m.id, name: m.name, version: m.version || '', description: m.description || '',
+    schedule: m.schedule || null, authRequired: !!m.authRequired, actions: m.actions || [],
+    enabled: isEnabled(m.id),
+    owner: own ? own.name : null,
+    lastRun: runs.lastFired || null, lastResult: runs.lastResult || null,
+  };
+}
+
+export const moduleAuthoring = {
+  template({ id = 'my-module', name = 'My Module', authRequired = true } = {}) {
+    const safeId = String(id).replace(/[^a-z0-9_-]/gi, '-').slice(0, 64) || 'my-module';
+    return {
+      ok: true, id: safeId,
+      code: `// ${name} — runs in the bridge on a schedule, with no agent present.
+export default {
+  id: '${safeId}',
+  name: ${JSON.stringify(name)},
+  version: '1.0.0',
+  description: 'What this automation does, in one line.',
+
+  // The time is the trigger. 24h local time.
+  schedule: { at: '09:00', days: ['MON', 'TUE', 'WED', 'THU', 'FRI'] },
+
+  // true  -> arm at 09:00 and wait until someone is at the browser (use when sign-in is needed)
+  // false -> run at 09:00 regardless
+  authRequired: ${authRequired},
+
+  // Declare everything you use; anything outside this list is refused at runtime.
+  actions: ['control', 'read'${authRequired ? '' : ''}],
+
+  async run(ctx) {
+    const tab = await ctx.tabs.open('https://example.com');
+    ${authRequired ? "await ctx.needsAuth([tab.tabId], 'Sign in to example.com to continue');\n    " : ''}const text = await ctx.read(tab.tabId);
+    await ctx.store.set('lastRun', { at: Date.now(), chars: text.length });
+    ctx.log('captured', text.length, 'characters');
+    await ctx.tabs.close(tab.tabId);
+  },
+};
+`,
+      next: 'Edit the template, then call module_write with the same id. Your first write needs the user to approve it.',
+    };
+  },
+
+  list() {
+    return { ok: true, modules: [...registry.values()].map(moduleSummary) };
+  },
+
+  get({ id }) {
+    const f = files.get(String(id));
+    if (!f || !existsSync(f)) return { ok: false, error: `no module "${id}" is installed — module_list shows what exists` };
+    return { ok: true, id, code: readFileSync(f, 'utf8') };
+  },
+
+  async write({ id, code }, who) {
+    if (!who || !who.client_id) return { ok: false, error: 'authoring requires an authorized agent' };
+    if (typeof id !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(id)) return { ok: false, error: 'id: required, must match [a-z0-9_-]{1,64}' };
+    if (typeof code !== 'string' || !code.trim()) return { ok: false, error: 'code: required — the full .mjs source' };
+
+    const parsed = await parseCandidate(code);
+    if (!parsed.ok) return { ok: false, error: parsed.error, hint: 'call module_template for a known-good starting point' };
+    const problems = validateManifest(parsed.manifest, id);
+    if (problems.length) return { ok: false, error: 'the manifest is not valid', problems, hint: 'fix these and call module_write again' };
+
+    const r = await agentInstallModule({ id, code, client_id: who.client_id, name: who.name });
+    if (!r.ok) return r;
+    if (r.needsApproval) return { ...r, message: `"${id}" is waiting for the user to approve it in the Browser Bridge extension popup. Once approved you own it and later writes apply immediately.` };
+    return { ...r, message: `"${id}" updated to v${r.version || '?'} — no approval needed, you own it.` };
+  },
+
+  async remove({ id }, who) {
+    if (!who || !who.client_id) return { ok: false, error: 'authoring requires an authorized agent' };
+    const own = moduleOwner(String(id));
+    if (!own) return { ok: false, error: `no module "${id}" is owned by an agent — a user-installed module must be deleted from the control panel` };
+    if (own.client_id !== who.client_id) return { ok: false, error: `"${id}" belongs to another agent (${own.name})` };
+    const r = await deleteModule(String(id));
+    return r.ok ? { ok: true, deleted: id } : r;
+  },
+};

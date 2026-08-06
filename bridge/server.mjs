@@ -32,12 +32,13 @@ import { startTray, setTrayState, stopTray, refreshTrayMenu } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle, coreToolNames } from './mcp.mjs';
 import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision, setBrowserMeta } from './pairing.mjs';
-import { configureRules, resolveTabUrl } from './rules.mjs';
-import { configureModules, loadModules, setDestinationContents, refreshModuleDestinations } from './modules.mjs';
+import { configureTabAccess, resolveTabUrl, tabAccess, setTabAccess, toggleOrigin, recordingCfg, storageFor } from './tabaccess.mjs';
+import { configureAutomation, startAutomation, noteBrowserActivity, runModuleNow, runningModules } from './automation.mjs';
+import { configureModules, loadModules } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
-import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations, moduleDashboardPath, agentInstallModule, moduleOwner, listModuleOwners } from './modules.mjs';
+import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, moduleDashboardPath, agentInstallModule, moduleOwner, listModuleOwners } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -139,7 +140,9 @@ function embeddedStatusPayload() {
       active: !!embeddedAgentLastSeen && (Date.now() - embeddedAgentLastSeen) < EMBEDDED_AGENT_IDLE_MS,
     },
     modulesEnabled: [...(state.modulesEnabled || [])],
-    rules: (state.rules || []).length,
+    // 2.0: the one access fact worth reporting. `none` here explains every refusal a
+    // host is about to see, which "rules: 0" never did.
+    tabAccess: tabAccess().mode,
     coreTools: CORE_TOOLS_ALLOW ? [...CORE_TOOLS_ALLOW] : 'all',
   };
 }
@@ -342,7 +345,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Capability platform web UI: Modules, Rule Builder, module pages, popup nav.
-  if (url.pathname.startsWith('/modules') || url.pathname.startsWith('/rules') || url.pathname === '/config' || url.pathname === '/bridge/nav' || url.pathname === '/artifacts/populate') {
+  if (url.pathname.startsWith('/modules') || url.pathname === '/tabs' || url.pathname === '/config' || url.pathname === '/bridge/nav') {
     return void uiRoutes(req, res, url).then((handled) => {
       if (!handled) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown path.' } });
     }).catch((e) => sendJson(res, 500, { error: { code: 'UI_ERROR', message: String(e && e.message) } }));
@@ -387,6 +390,13 @@ const server = http.createServer((req, res) => {
   // records that agent as its owner. After that the same agent may update that module
   // unattended, so a host app can keep its module current without training the user to
   // click through approvals. Revoking the agent's grant ends it.
+  if (req.method === 'GET' && url.pathname === '/bridge/tabaccess') {
+    return sendJson(res, 200, { tabAccess: tabAccess() });
+  }
+  if (req.method === 'POST' && url.pathname === '/bridge/tabaccess') {
+    return readJsonBody(req).then((b) => sendJson(res, 200,
+      b && b.origin ? toggleOrigin(String(b.origin)) : setTabAccess(b || {})));
+  }
   if (req.method === 'POST' && url.pathname === '/bridge/module/install') {
     const grant = validateToken(req.headers.authorization, req);
     if (!grant) return sendJson(res, 401, { error: { code: 'UNAUTHORIZED', message: 'Agent bearer token required.' } }, { 'www-authenticate': wwwAuthenticate(req) });
@@ -687,8 +697,15 @@ wss.on('connection', (ws) => {
       } catch (e) { log('pair error:', e && e.message); }
       return;
     }
+    // "A human is at the browser." Sent by the extension on tab switches, committed
+    // navigations and window focus, throttled on its side. The automation engine's auth
+    // gate holds a scheduled run until it sees one of these, so a 9am job on a laptop
+    // opened at 9:41 runs at 9:41 instead of prompting an empty screen.
+    if (msg.type === 'activity') { noteBrowserActivity(); return; }
+
     // Unsolicited monitor events (no id) are written to a tmp session dir.
     if (msg.type === 'monitor_event') {
+      noteBrowserActivity();
       writeMonitorEvent(msg);
       return;
     }
@@ -698,6 +715,7 @@ wss.on('connection', (ws) => {
     // The frame must be HMAC-signed with a linked browser's pairing key — a user
     // decision only the real extension can produce; forged/unsigned frames are dropped.
     if (msg.type === 'overlay_mark') {
+      noteBrowserActivity(); // a click on a badge is a person, by definition
       if (verifyMark(msg)) pushOverlayMark(msg);
       else log('overlay_mark rejected (missing/invalid signature)');
       return;
@@ -812,13 +830,12 @@ function writeMonitorEvent(ev) {
   const key = ev.sessionKey;
   if (!key) return;
 
-  // Storage class handling. The Research module's default (bridge-owned) wins;
-  // ev.storage from the extension is the legacy fallback until the ext refactor.
+  // Storage class handling. The bridge's own setting wins (Tabs page, per-origin with a
+  // global default); ev.storage from the extension is the legacy fallback. This used to
+  // read the Research module's state, which meant where a recording landed depended on
+  // which module happened to be installed.
   if (ev.kind === 'session' && ev.event === 'start') {
-    const r = state.artifacts.research || {};
-    let origin = null; try { origin = new URL(ev.url).origin; } catch {}
-    const perOrigin = origin && r.storage && r.storage[origin];
-    sessionRoot.set(key, (perOrigin || r.storageDefault || ev.storage) === 'perm' ? 'perm' : 'tmp');
+    sessionRoot.set(key, (storageFor(ev.url) || ev.storage) === 'perm' ? 'perm' : 'tmp');
     liveSessions.add(key); trayRefresh();
   } else if (ev.kind === 'session' && ev.event === 'stop') {
     liveSessions.delete(key); trayRefresh();
@@ -1020,16 +1037,19 @@ function serveDashboard(res) {
 // ---------------------------------------------------------------------------
 // Capability platform: wire the rule engine + module loader.
 // ---------------------------------------------------------------------------
-configureRules({ relayCommand });
+configureTabAccess({ relayCommand });
 const moduleCtx = {
   relayCommand, state, save, resolveTabUrl,
-  setDestinationContents, refreshModuleDestinations,
   monitor: { listSessions, readEvents, readShot, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS },
   // Overlay capability: the user's in-page marks, awaiting collection by an agent.
   overlay: { marks: listOverlayMarks },
 };
 configureModules(moduleCtx);
+configureAutomation(moduleCtx);
 await loadModules();
+// Scheduled modules run with no agent connected — this is what makes a module useful on
+// its own. Started after loadModules() so the first tick sees the real registry.
+startAutomation();
 
 // EMBEDDED SELF-CHECK. Embedded mode removes the control plane, so any state whose
 // ONLY writer is the UI silently stays empty — and every such case presents
@@ -1045,12 +1065,6 @@ if (EMBEDDED) {
     }
     if (!listModules().some((m) => m.enabled)) {
       log('self-check: no module is enabled, so every tool call will be denied (deny-by-default).');
-    }
-    for (const d of allDestinations()) {
-      if (!d.moduleId) continue; // user-created destinations don't exist without a UI anyway
-      if (!(d.patterns || []).length) {
-        log(`self-check: destination "${d.id}" (module ${d.moduleId}) has no patterns — rules using it DENY every target. That is correct for a deny-by-default module the user opts into via the control plane, but embedded mode has no such UI: if this module is meant to work here, it must populate the destination itself (onEnable/populate).`);
-      }
     }
   } catch (e) { log('self-check failed:', e && e.message); }
 }

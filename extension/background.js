@@ -634,6 +634,18 @@ async function handleCommand(cmd) {
         await requireAuth(cmd);
         return { id, result: await doPageScroll(params) };
 
+      case 'page.download':
+        await requireAuth(cmd);
+        return { id, result: await doPageDownload(params) };
+
+      case 'page.upload':
+        await requireAuth(cmd);
+        return { id, result: await doPageUpload(params) };
+
+      case 'notify':
+        await requireAuth(cmd);
+        return { id, result: await doNotify(params) };
+
       case 'monitor.start':
         await requireAuth(cmd);
         return { id, result: await monitorStart(params.tabId) };
@@ -1097,6 +1109,131 @@ async function doPageFill(params) {
   return { tabId, ...out };
 }
 
+// --- Download ---------------------------------------------------------------
+// Two shapes, because "download this" means two different things on the web:
+//   * a plain URL  -> chrome.downloads, which follows redirects and uses the profile's
+//                     cookies, so authenticated report exports work.
+//   * a same-origin resource the page must fetch itself (signed URL, POST-built blob)
+//                     -> fetch in the page, hand back a data: URL, download that.
+// Returns the on-disk filename, because "where did it go" is the question that follows.
+async function doPageDownload(params) {
+  const { tabId, url, filename, saveAs } = params || {};
+  if (typeof url !== 'string' || !url) throw new CmdError('BAD_REQUEST', 'params.url (string) is required.');
+  if (/^(javascript|file):/i.test(url)) throw new CmdError('FORBIDDEN', 'refusing to download that scheme.');
+
+  let target = url;
+  // Relative URLs only make sense against the tab, so resolve them there.
+  if (typeof tabId === 'number' && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, func: (u) => new URL(u, location.href).href, args: [url],
+    });
+    target = (r && r.result) || url;
+  }
+
+  let downloadId;
+  try {
+    downloadId = await chrome.downloads.download({
+      url: target,
+      ...(filename ? { filename: String(filename).replace(/^[/\\]+/, '') } : {}),
+      saveAs: !!saveAs,
+      conflictAction: 'uniquify',
+    });
+  } catch (e) {
+    throw new CmdError('INTERNAL', 'download failed: ' + (e && e.message));
+  }
+
+  // Wait briefly for a filename. A large file is still in flight when this resolves —
+  // that's fine, the path is already assigned and is what the caller needs.
+  const info = await waitForDownload(downloadId, 15000);
+  return {
+    downloadId,
+    url: target,
+    path: info ? info.filename : null,
+    state: info ? info.state : 'in_progress',
+    bytes: info ? info.bytesReceived : 0,
+  };
+}
+
+function waitForDownload(downloadId, timeoutMs) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const poll = async () => {
+      let items = [];
+      try { items = await chrome.downloads.search({ id: downloadId }); } catch (e) { /* gone */ }
+      const it = items && items[0];
+      if (it && (it.filename || it.state === 'complete' || it.state === 'interrupted')) return resolve(it);
+      if (Date.now() - started > timeoutMs) return resolve(it || null);
+      setTimeout(poll, 250);
+    };
+    poll();
+  });
+}
+
+// --- Upload -----------------------------------------------------------------
+// Set a file input's `files` from bytes we supply. A synthetic assignment is invisible
+// to most frameworks unless the change is dispatched, so we do both — same reason
+// doPageFill uses the native value setter.
+async function doPageUpload(params) {
+  const { tabId, selector, files } = params || {};
+  if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
+  if (typeof selector !== 'string' || !selector) throw new CmdError('BAD_REQUEST', 'params.selector (CSS string) is required.');
+  const list = [].concat(files || []).filter((f) => f && f.name && typeof f.content === 'string');
+  if (!list.length) throw new CmdError('BAD_REQUEST', 'params.files: [{ name, content (base64), type? }] is required.');
+
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (sel, specs) => {
+      let el;
+      try { el = document.querySelector(sel); } catch (e) { return { error: 'bad selector: ' + e.message }; }
+      if (!el) return { error: 'no element matches that selector' };
+      if (el.tagName !== 'INPUT' || (el.type || '').toLowerCase() !== 'file') {
+        return { error: 'element is not an <input type="file">' };
+      }
+      if (!el.multiple && specs.length > 1) return { error: 'that input accepts a single file' };
+      const dt = new DataTransfer();
+      for (const s of specs) {
+        let bytes;
+        try {
+          const bin = atob(s.content);
+          bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        } catch (e) { return { error: 'file "' + s.name + '" is not valid base64' }; }
+        dt.items.add(new File([bytes], s.name, { type: s.type || 'application/octet-stream' }));
+      }
+      el.files = dt.files;
+      const fire = (t) => { try { el.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) { /* best effort */ } };
+      fire('input'); fire('change');
+      return { uploaded: Array.from(el.files).map((f) => ({ name: f.name, size: f.size })) };
+    },
+    args: [selector, list.map((f) => ({ name: String(f.name), content: f.content, type: f.type || '' }))],
+  });
+  const out = res && res.result;
+  if (!out) throw new CmdError('INTERNAL', 'No result from page.');
+  if (out.error) throw new CmdError('NOT_FOUND', out.error);
+  return { tabId, ...out };
+}
+
+// --- Notify -----------------------------------------------------------------
+// How a scheduled module reaches the user: "Deep Research is running — sign in to these
+// tabs." Without this an authRequired run waits silently and looks broken.
+async function doNotify(params) {
+  const { title, message } = params || {};
+  try {
+    await chrome.notifications.create('', {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: String(title || 'Browser Bridge').slice(0, 120),
+      message: String(message || '').slice(0, 500),
+      priority: 1,
+    });
+    return { notified: true };
+  } catch (e) {
+    // Notifications can be off at the OS level. That's the user's call, not an error
+    // worth failing a whole automation run over.
+    return { notified: false, reason: (e && e.message) || 'notifications unavailable' };
+  }
+}
+
 async function doPageScroll(params) {
   const { tabId, to, pages, selector } = params || {};
   if (typeof tabId !== 'number') throw new CmdError('BAD_REQUEST', 'params.tabId (number) required.');
@@ -1476,7 +1613,9 @@ function __bridgeOverlay(rules) {
   const MARK = 'data-bridge-ann';
   const LEGACY_MARK = 'data-aibridge-ann'; // pre-rename injections — always cleaned up
   const DIM = '__bridge-dim', STRIKE = '__bridge-strike', HIDE = '__bridge-hide';
-  const S = window.__bridgeOverlayState || (window.__bridgeOverlayState = { rules: [], timer: null, rtimer: null, rendering: false, panels: new Set() });
+  const LAYER = '__bridge-ann-layer';
+  const S = window.__bridgeOverlayState || (window.__bridgeOverlayState = { rules: [], timer: null, rtimer: null, rendering: false, panels: new Set(), anchors: [] });
+  if (!S.anchors) S.anchors = [];
   S.rules = Array.isArray(rules) ? rules : [];
   // Neutralize a pre-rename engine left injected before an extension reload: emptying
   // its rule set stops its own observer from re-rendering stale badges alongside ours.
@@ -1496,15 +1635,97 @@ function __bridgeOverlay(rules) {
     st.textContent =
       '.' + DIM + '{opacity:.4 !important;filter:grayscale(.8) !important}' +
       '.' + STRIKE + '{text-decoration:line-through !important;text-decoration-color:#f85149 !important;text-decoration-thickness:2px !important}' +
-      '.' + HIDE + '{display:none !important}';
+      '.' + HIDE + '{display:none !important}' +
+      // The layer is a popover so the browser puts it in the TOP LAYER — above every
+      // stacking context on the page. z-index alone cannot do this: a badge appended
+      // inside a card is clipped by any `overflow:hidden` or transformed ancestor no
+      // matter how large its z-index, which is exactly what used to hide badges on
+      // real listing sites. Popover's UA styles have to be undone by hand.
+      '#' + LAYER + '{position:fixed !important;inset:0 !important;margin:0 !important;border:0 !important;' +
+      'padding:0 !important;width:100vw !important;height:100vh !important;max-width:none !important;max-height:none !important;' +
+      'background:transparent !important;overflow:visible !important;pointer-events:none !important;display:block !important;' +
+      'z-index:2147483647}' +
+      '#' + LAYER + '::backdrop{background:transparent}' +
+      '#' + LAYER + ' > [' + MARK + ']{position:absolute;pointer-events:auto}';
     (document.head || document.documentElement).appendChild(st);
   }
 
+  // One container for every badge. Recreated if the page removed it (SPA route swaps
+  // sometimes wipe body children).
+  function ensureLayer() {
+    let el = document.getElementById(LAYER);
+    if (el && !el.isConnected) el = null;
+    if (!el) {
+      el = document.createElement('div');
+      el.id = LAYER;
+      el.setAttribute(MARK, 'layer');
+      // `manual` so a click elsewhere on the page never light-dismisses the layer.
+      try { el.popover = 'manual'; } catch (e) {}
+      document.body.appendChild(el);
+    }
+    // Showing is what actually promotes it into the top layer, and a popover that was
+    // closed (by a page calling hidePopover, by a navigation) renders as display:none.
+    try { if (el.popover && !el.matches(':popover-open')) el.showPopover(); }
+    catch (e) { el.style.zIndex = '2147483647'; } // pre-popover Chromium: best-effort z-index
+    return el;
+  }
+
   function clearAll() {
-    document.querySelectorAll('[' + MARK + '],[' + LEGACY_MARK + ']').forEach((n) => n.remove());
+    // Badges only ever live in the layer now, but a page loaded before this version can
+    // still hold inline ones — keep removing those so an upgrade cleans up after itself.
+    document.querySelectorAll('[' + MARK + '],[' + LEGACY_MARK + ']').forEach((n) => {
+      if (n.id !== LAYER) n.remove();
+    });
+    const layer = document.getElementById(LAYER);
+    if (layer) layer.textContent = '';
     [DIM, STRIKE, HIDE, '__aibridge-dim', '__aibridge-strike', '__aibridge-hide']
       .forEach((c) => document.querySelectorAll('.' + c).forEach((n) => n.classList.remove(c)));
     S.panels.clear();
+    S.anchors.length = 0;
+  }
+
+  // Put each badge where its anchor currently is. The layer is fixed to the viewport,
+  // so a badge's absolute coordinates ARE the anchor's viewport rect — no scroll math,
+  // and it stays right during scroll, zoom and reflow.
+  function place() {
+    if (!S.anchors.length) return;
+    // documentElement.clientWidth is the reliable one; innerWidth reads 0 in a page that
+    // has not been given a viewport yet (backgrounded/restored tab, offscreen render).
+    // A viewport of 0 is UNKNOWN, not "everything is off-screen" — culling against it
+    // would hide every badge until the next scroll, so skip culling and clamping until
+    // we have real numbers.
+    const de = document.documentElement;
+    const vw = (de && de.clientWidth) || innerWidth || 0;
+    const vh = (de && de.clientHeight) || innerHeight || 0;
+    const known = vw > 0 && vh > 0;
+    for (const a of S.anchors) {
+      const el = a.el, host = a.host;
+      if (!host.isConnected) continue;
+      if (!el || !el.isConnected) { host.style.display = 'none'; continue; }
+      // Prefer the matched text's own box; fall back to the element when the text has
+      // been re-rendered underneath us (virtualised lists do this constantly).
+      const r = rangeRect(a) || el.getBoundingClientRect();
+      // An anchor with no box (display:none, collapsed, virtualised away) has no sane
+      // position — hide rather than pinning the badge to 0,0.
+      if (!r.width && !r.height) { host.style.display = 'none'; continue; }
+      if (known && (r.bottom < -40 || r.top > vh + 40 || r.right < -40 || r.left > vw + 40)) {
+        host.style.display = 'none'; continue;
+      }
+      host.style.display = 'block';
+      // `after` anchors (links) sit to the right of the anchor; others hug its top-left,
+      // which is where an inline badge used to land.
+      const left = a.after ? r.right + 6 : r.left;
+      const top = a.after ? r.top : Math.max(0, r.top - 2);
+      host.style.left = Math.round(known ? Math.min(Math.max(left, 0), vw - 24) : Math.max(left, 0)) + 'px';
+      host.style.top = Math.round(known ? Math.min(Math.max(top, 0), vh - 16) : Math.max(top, 0)) + 'px';
+    }
+  }
+
+  let placeQueued = false;
+  function schedulePlace() {
+    if (placeQueued) return;
+    placeQueued = true;
+    requestAnimationFrame(() => { placeQueued = false; try { place(); } catch (e) {} });
   }
 
   // Badge lives in a CLOSED shadow root inside an `all:initial` host, so page CSS
@@ -1513,7 +1734,9 @@ function __bridgeOverlay(rules) {
   function makeBadge(rule) {
     const host = document.createElement('span');
     host.setAttribute(MARK, cut(rule.key, 120) || '1');
-    host.style.cssText = 'all:initial;display:inline-block;vertical-align:middle;margin:0 4px';
+    // `all:initial` is inline, so it would beat the layer's stylesheet rule — position
+    // and pointer-events have to be set here or the badge lands static and inert.
+    host.style.cssText = 'all:initial;position:absolute;display:none;pointer-events:auto';
     const sh = host.attachShadow({ mode: 'closed' });
     const color = safeColor(rule.badge && rule.badge.color);
     const st = document.createElement('style');
@@ -1631,8 +1854,30 @@ function __bridgeOverlay(rules) {
       },
     });
     let n;
-    while ((n = w.nextNode()) && out.length < 25) if (out.indexOf(n.parentElement) < 0) out.push(n.parentElement);
+    while ((n = w.nextNode()) && out.length < 25) {
+      const p = n.parentElement;
+      if (out.some((x) => x.el === p)) continue;
+      // Keep the text node and offset alongside the element. Now that badges float in
+      // the top layer they have to be positioned, and positioning off the whole element
+      // would drop the badge on top of its own text. A Range over the matched substring
+      // gives the exact end of the match, so the badge sits after it the way the old
+      // inline badge did.
+      out.push({ el: p, node: n, at: n.nodeValue.toUpperCase().indexOf(want), len: String(needle).length });
+    }
     return out;
+  }
+
+  // Viewport rect of the matched substring, or null if the node has moved on.
+  function rangeRect(a) {
+    if (!a.node || !a.node.isConnected || a.at < 0) return null;
+    try {
+      const r = document.createRange();
+      const max = a.node.nodeValue.length;
+      r.setStart(a.node, Math.min(a.at, max));
+      r.setEnd(a.node, Math.min(a.at + a.len, max));
+      const box = r.getBoundingClientRect();
+      return box && (box.width || box.height) ? box : null;
+    } catch (e) { return null; }
   }
 
   // Match an id inside link hrefs with a BOUNDARY: "/15934651" must not also light
@@ -1654,21 +1899,23 @@ function __bridgeOverlay(rules) {
     try {
       ensureStyle();
       clearAll();
+      const layer = ensureLayer();
       // Pass 1: find every match first, so card styling can tell when a container
       // spans MORE than one annotated listing.
       const targets = []; // { r, el, after }
       for (const r of S.rules) {
         if (!r || !r.match) continue;
         try {
-          if (r.match.text) { for (const el of textTargets(r.match.text)) targets.push({ r, el, after: false }); }
+          if (r.match.text) { for (const t of textTargets(r.match.text)) targets.push({ r, el: t.el, node: t.node, at: t.at, len: t.len, after: true }); }
           else if (r.match.href) { for (const el of hrefTargets(String(r.match.href))) targets.push({ r, el, after: true }); } // never nest the badge inside the link
           else if (r.match.selector) { for (const el of Array.prototype.slice.call(document.querySelectorAll(r.match.selector)).slice(0, 25)) targets.push({ r, el, after: false }); }
           else if (r.match.urlPattern) {
             if (globRe(r.match.urlPattern).test(location.href)) {
-              // Whole page is this item → fixed banner, top-right.
+              // Whole page is this item → banner pinned top-right of the layer. No
+              // anchor, so `place()` leaves it where it is.
               const badge = makeBadge(r);
-              badge.style.cssText = 'all:initial;display:block;position:fixed;top:12px;right:12px;z-index:2147483647';
-              document.body.appendChild(badge);
+              badge.style.cssText = 'all:initial;display:block;position:absolute;top:12px;right:12px;pointer-events:auto';
+              layer.appendChild(badge);
               const c = r.cardSelector ? document.querySelector(r.cardSelector) : null;
               if (c && r.card) applyCard(c, r.card);
             }
@@ -1681,13 +1928,18 @@ function __bridgeOverlay(rules) {
         if (!el || !el.isConnected || el.closest('[' + MARK + ']')) continue;
         try {
           const badge = makeBadge(r);
-          if (t.after) el.insertAdjacentElement('afterend', badge); else el.appendChild(badge);
+          // Into the top layer, NOT into the page — then anchored to `el` by position.
+          // This is what keeps a badge visible inside a clipping or transformed card.
+          badge.style.display = 'none'; // until place() gives it real coordinates
+          layer.appendChild(badge);
+          S.anchors.push({ el, host: badge, after: !!t.after, node: t.node || null, at: t.at, len: t.len });
           if (r.card) {
             const c = cardOf(el, r.cardSelector, r.key, targets);
             if (c) applyCard(c, r.card);
           }
         } catch (e) { /* skip this target */ }
       }
+      place();
     } finally {
       // Mutation records for our writes are delivered at the next microtask
       // checkpoint — before timers — so resetting on a 0ms timer skips exactly them.
@@ -1700,13 +1952,18 @@ function __bridgeOverlay(rules) {
   // never page content, so this stays inside the `annotate` permission).
   function report() {
     const matched = [], visible = [];
-    document.querySelectorAll('[' + MARK + ']').forEach((n) => {
+    const layer = document.getElementById(LAYER);
+    const badges = layer ? Array.prototype.slice.call(layer.children) : [];
+    for (const n of badges) {
       const k = n.getAttribute(MARK);
-      if (!k || k === '1') return;
+      if (!k || k === '1' || k === 'layer') continue;
       if (matched.indexOf(k) < 0) matched.push(k);
-      const r = n.getBoundingClientRect();
+      // "On screen" is a fact about the ANCHOR, not the badge: the badge is clamped to
+      // the viewport, so its own rect would report every badge as visible forever.
+      const a = S.anchors.find((x) => x.host === n);
+      const r = (a && a.el && a.el.isConnected ? a.el : n).getBoundingClientRect();
       if (r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth && visible.indexOf(k) < 0) visible.push(k);
-    });
+    }
     try { chrome.runtime.sendMessage({ type: 'OVERLAY_SEEN', matched, visible }).catch(() => {}); } catch (e) {}
   }
 
@@ -1719,8 +1976,11 @@ function __bridgeOverlay(rules) {
     // History API URL changes, so the page has to notice for itself. S.rendering
     // suppresses the mutations render itself makes (else this loops forever).
     try {
-      new MutationObserver(() => { if (!S.rendering && S.rules.length) schedule(); })
-        .observe(document.documentElement, { childList: true, subtree: true });
+      new MutationObserver(() => {
+        if (S.rendering || !S.rules.length) return;
+        schedulePlace(); // anchors may have shifted even when the rule set is unchanged
+        schedule();
+      }).observe(document.documentElement, { childList: true, subtree: true });
     } catch (e) {}
     for (const m of ['pushState', 'replaceState']) {
       try {
@@ -1729,7 +1989,17 @@ function __bridgeOverlay(rules) {
       } catch (e) {}
     }
     addEventListener('popstate', schedule);
-    addEventListener('scroll', () => { clearTimeout(S.rtimer); S.rtimer = setTimeout(report, 300); }, true);
+    // Two different cadences on scroll: reposition every frame (a badge that lags its
+    // anchor looks broken), but report visibility on a lazy timer (it's a network hop).
+    // `capture` catches scrolling in inner containers, not just the document.
+    addEventListener('scroll', () => {
+      schedulePlace();
+      clearTimeout(S.rtimer); S.rtimer = setTimeout(report, 300);
+    }, true);
+    addEventListener('resize', schedulePlace);
+    // Anchors move without any scroll or mutation — a font loading, an image sizing, a
+    // CSS transition settling. Cheap to re-place; there are at most a few dozen badges.
+    try { new ResizeObserver(schedulePlace).observe(document.documentElement); } catch (e) {}
     // Clicking anywhere outside a badge closes any open mark panel. Badge internals
     // are retargeted to their shadow host (which carries MARK), so they don't match.
     addEventListener('click', (e) => {
@@ -1818,6 +2088,26 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   overlayStore(tabId, []).catch(() => {});
   overlaySeenAt.delete(tabId);
   sessGet(OVERLAY_SEEN_KEY).then((s) => { if (s[String(tabId)]) { delete s[String(tabId)]; return sessSet(OVERLAY_SEEN_KEY, s); } }).catch(() => {});
+});
+
+// --- Browser-activity heartbeat ---------------------------------------------
+// Tells the bridge a human is at the browser, so a scheduled module with
+// `authRequired: true` knows when it's worth asking for a sign-in. Deliberately
+// content-free — no tab id, no URL, no title — because "someone is here" is the entire
+// fact needed, and anything more would be reporting browsing the user didn't enable.
+// Throttled hard: one frame a minute is plenty for a 30s scheduler tick.
+const ACTIVITY_THROTTLE_MS = 60_000;
+let lastActivitySent = 0;
+function pingActivity() {
+  const now = Date.now();
+  if (now - lastActivitySent < ACTIVITY_THROTTLE_MS) return;
+  lastActivitySent = now;
+  sendToOffscreen({ type: 'WS_SEND', frame: { type: 'activity' } }).catch(() => {});
+}
+chrome.tabs.onActivated.addListener(() => pingActivity());
+chrome.tabs.onUpdated.addListener((_id, info) => { if (info.status === 'complete') pingActivity(); });
+chrome.windows.onFocusChanged.addListener((winId) => {
+  if (winId !== chrome.windows.WINDOW_ID_NONE) pingActivity();
 });
 
 // Only allow http(s) navigation targets; block file:, chrome:, javascript:, etc.

@@ -1,7 +1,7 @@
 # Embedded mode
 
 Embedded mode lets a **host application** run the real bridge as an internal component —
-same relay, same MCP dispatch, same module loading, same rules engine, same state handling
+same relay, same MCP dispatch, same module loading, same tab access, same state handling
 as standalone — with the user-facing surface removed. Upstream fixes flow into the host by
 updating the bridge, not by maintaining a fork.
 
@@ -11,8 +11,8 @@ updating the bridge, not by maintaining a fork.
 BRIDGE_EMBEDDED=1
 BRIDGE_EMBEDDED_TOKEN=<random, >= 16 chars>          # per-launch bearer + extension auth
 BRIDGE_EMBEDDED_EXT_ORIGIN=chrome-extension://<id>   # the ONLY origin allowed to attach
-BRIDGE_EMBEDDED_SOURCE=<name>                        # optional; rule-engine source name
-                                                     # for the host's calls (default "Host App")
+BRIDGE_EMBEDDED_SOURCE=<name>                        # optional; display name for the host's
+                                                     # calls in logs/UI (default "Host App")
 BRIDGE_EMBEDDED_CORE_TOOLS=all|off|<allowlist>       # optional; see "Core tools" below
 BRIDGE_PORT=<port>                                   # optional (default 8787)
 BRIDGE_STATE_FILE=<path>                             # optional; honored ONLY in embedded mode
@@ -27,7 +27,7 @@ extension origin — it never boots half-locked-down.
 | Surface | Standalone | Embedded |
 |---|---|---|
 | Tray, update checker | on | off (the host owns both) |
-| Web control plane (`/`, `/config`, `/modules*`, `/rules*`, …) | loopback UI | **404** |
+| Web control plane (`/`, `/config`, `/tabs`, `/modules*`, …) | loopback UI | **404** |
 | OAuth AS (`/oauth/*`, `/.well-known/*`) | DCR + consent | **404** |
 | `/command` legacy relay | trusted-local | **404** |
 | `POST /mcp` | OAuth bearer | `BRIDGE_EMBEDDED_TOKEN` bearer (constant-time) |
@@ -101,7 +101,7 @@ Ignored in standalone mode.
   "url": "http://127.0.0.1:47830", "mcpUrl": "http://127.0.0.1:47830/mcp",
   "browserConnected": true,
   "agent": { "name": "AI Analyst", "lastSeen": 1785440000000, "active": true },
-  "modulesEnabled": ["ai-analyst"], "rules": 1, "coreTools": []
+  "modulesEnabled": ["ai-analyst"], "tabAccess": "all", "coreTools": []
 }
 ```
 
@@ -141,31 +141,24 @@ anything". At boot an embedded bridge logs what it finds:
 - a module installed but **not enabled** (there is no UI to enable it — give it
   `autoEnable: true`)
 - **no** module enabled at all (deny-by-default means every call is refused)
-- an enabled module whose destination has **no patterns** (rules using it deny every
-  target — correct for a module the user opts into via the control plane, but embedded
-  has no such UI, so the module must populate it itself)
+- **tab access left at `none`** (the deny-by-default start). Standalone the user fixes
+  this at `/tabs`; embedded has no such UI, so the host must set `state.tabAccess`
+  itself when it provisions the install.
 
-## Rule-engine identity
+## Access identity
 
-Calls through `/mcp` evaluate with the source name `BRIDGE_EMBEDDED_SOURCE`. Rules are
-seeded by modules exactly as in standalone (there is no UI, so modules should declare
-`autoEnable: true` and ship the base rules they need).
+`BRIDGE_EMBEDDED_SOURCE` names the host in logs and in the control panel. It is a label,
+not a gate: in 2.0 every authorized caller gets the full core tool set, narrowed only by
+`BRIDGE_EMBEDDED_CORE_TOOLS` and by `state.tabAccess` (which sites are in scope). There
+is no per-source rule matrix to seed.
 
-## Module tools and verbs
+## Modules in 2.0
 
-A module tool may declare a `verb` from the closed vocabulary
-`read | write | control | record | annotate`:
+**Breaking:** modules no longer contribute MCP tools. A module is a scheduled automation
+that runs inside the bridge with no agent present; an agent AUTHORS one (`module_write`)
+rather than calling it. A host that previously shipped its whole surface as module tools
+must serve those tools itself — the bridge will neither advertise nor dispatch them.
 
-```js
-tools: {
-  fetch_thing:  { verb: 'read',  description, inputSchema, handler },
-  apply_change: { verb: 'write', description, inputSchema, handler },
-}
-```
-
-Declared-verb tools are evaluated by the rules engine exactly like core tools:
-`(source → destination : verb)`, with the target URL derived from the call's `tabId`,
-`url`, or `host` argument (none → evaluated on source + verb alone). A rule like
-*"Any Agent → jira : deny write"* therefore covers module tools too, and stays
-meaningful to a user who has never heard of the module. A tool with **no** verb keeps
-the previous ungated behaviour (the module self-gates); don't invent new verbs.
+Modules run under the same `state.tabAccess` as agents and may only use the `actions`
+their manifest declares, so installing one grants no reach beyond what the host already
+allowed.

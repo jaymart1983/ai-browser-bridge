@@ -1,14 +1,14 @@
 # Browser Bridge
 
 A local bridge plus a browser extension that lets AI agents drive your real,
-logged-in browser under rules you control. It runs entirely on your machine
+logged-in browser on sites you choose. It runs entirely on your machine
 (loopback only) and speaks the Model Context Protocol, so any MCP-capable agent
 (Claude Code, Claude Desktop, OpenCode, and others) can use it once you
 authorize that agent.
 
 Nothing leaves your device. The bridge listens only on 127.0.0.1. Each agent
-gets its own authorization that you can revoke at any time, and every action is
-checked against rules before it runs.
+gets its own authorization that you can revoke at any time, and no agent can
+touch a site you have not enabled.
 
 ## How it works
 
@@ -17,20 +17,36 @@ There are two halves:
 - The extension is thin. Its only jobs are to pair with the bridge and to run
   the browser commands the bridge signs. It holds no policy.
 - The bridge is the brain. It is an MCP server, its own OAuth authorization
-  server, a rule engine, and a small web control panel. It decides what each
-  agent is allowed to do and relays approved commands to the extension.
+  server, an automation scheduler, and a small web control panel.
 
-Access is granted by rules of the form Source, Destination, Permission, and
-denied by default:
+An authorized agent gets the full set of primitives: list tabs, read a page,
+click, fill, scroll, navigate, open and close tabs, upload and download files,
+record a tab to disk, and annotate over the page. There is one access control,
+and it is the one worth having: **which sites are in scope**. You set it under
+Tabs — All, a list you choose, or Off — and it is Off on a fresh install. A call
+against a site you have not enabled is refused, whether it comes from an agent
+or from a module.
 
-- Source is the agent, identified by the name it registered under.
-- Permission is one of read, write, control, or record.
-- Destination is a set of sites matched by origin or URL pattern.
+## Automations (modules)
 
-Capabilities are added as modules. A module is a single file dropped into
-bridge/modules that registers its own rules, tools, and settings pages. The
-project ships one example module, Deep Research, which lets an agent read,
-navigate, control, and record a chosen set of tabs.
+A module is a single file dropped into `bridge/modules`. It is not a way to give
+an agent new tools — agents already have them all. A module is code that runs
+**inside the bridge on a schedule, with no agent present**: "every weekday at
+09:00, once someone is actually at the browser, open these three tabs, let me
+sign in, then record them."
+
+Time of day is the trigger. Being at the browser is a *gate*: a module with
+`authRequired: true` arms at 09:00 and waits, so a laptop opened at 09:41 gets
+its run at 09:41 instead of an auth prompt nobody saw. Modules obey the same
+Tabs setting agents do, and may only use the actions they declare.
+
+Agents write modules for you rather than calling them — `module_authoring_guide`
+and `module_template` over MCP give an agent the exact contract. The first
+install of a module id needs your approval in the extension popup; after that
+the owning agent can keep it up to date on its own.
+
+The project ships one example, Deep Research, which opens your research sites,
+waits for you to sign in, and records them for later review.
 
 ## Requirements
 
@@ -96,15 +112,18 @@ Then, one time:
    the bridge and the extension trust each other. After linking, the browser is
    paired and no shared password is used.
 
-5. Enable a module and set access. Open http://127.0.0.1:8787, go to Modules,
-   enable Deep Research, then open it and choose which tabs agents may use.
+5. Choose which sites are in scope. Open http://127.0.0.1:8787/tabs and pick
+   All tabs, or add the sites you want. It starts Off, so nothing works until
+   you do this.
 
 6. Connect your agent. See "Connecting an agent" below. In short: register
    http://127.0.0.1:8787/mcp with your agent, authenticate, and approve the
    request in the extension popup.
 
-Once connected, the agent has the browser tools (browser_navigate, browser_eval,
-browser_read, browser_screenshot, and so on), limited to what your rules allow.
+Once connected, the agent has the full browser tool set (browser_navigate,
+browser_read, browser_click, browser_fill, browser_screenshot, browser_download,
+browser_upload, browser_annotate, browser_monitor_*, and so on) on the sites you
+enabled under Tabs.
 
 ## Connecting an agent
 
@@ -180,9 +199,11 @@ rather than on your machine, it cannot reach a loopback address without a tunnel
 Everything is in the web control panel at http://127.0.0.1:8787:
 
 - Config: pairing status, authorized agents, storage usage
-- Modules: enable, disable, upload, or delete capability modules
-- Rules: build and edit the Source, Destination, Permission rules
-- Each enabled module has its own page for its settings
+- Tabs: which sites agents and modules may act on, and where each tab's
+  recording is saved (temporary or kept)
+- Modules: enable, disable, upload, or delete automations; each module's page
+  shows its schedule, what it may do, its owner, and its last and next run
+- Each enabled module can add a page of its own
 
 You can also reach these from the extension popup and the menu bar tray icon.
 
@@ -193,7 +214,12 @@ You can also reach these from the extension popup and the menu bar tray icon.
   every command it relays, and the extension runs only signed commands.
 - Agents authenticate with OAuth 2.1 and PKCE. Each grant is per agent and
   revocable from the control panel or the popup.
-- Deny by default. An agent can do nothing until a rule allows it.
+- Deny by default. Tab access starts Off; an agent can reach nothing until you
+  enable a site.
+- The bridge never fills a password field, and refuses to, in the extension
+  itself rather than by policy alone.
+- A module runs under the same tab access as an agent, and only with the
+  actions it declared. Installing one grants no extra reach.
 
 ## Uninstall
 
