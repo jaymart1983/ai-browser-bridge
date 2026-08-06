@@ -41,6 +41,26 @@ the user approves, the module is installed **and your agent is recorded as its o
 Applied immediately. No prompt. Call it on every launch — if the code is unchanged the
 result is simply a reload.
 
+## Declare a version
+
+Put `version` in your manifest. It is what lets a user confirm that what's installed is
+what you shipped:
+
+```js
+export default { id: 'your-module-id', name: 'Your Module', version: '2.0.35', /* … */ };
+```
+
+The bridge shows it on the Modules page and on the module's own page, returns it in the
+install response so you can log what actually landed, and records it against the
+ownership claim:
+
+```json
+{ "ok": true, "applied": true, "id": "ai-analyst", "version": "2.0.35", "file": "ai-analyst.mjs" }
+```
+
+A module with no `version` is listed as **"no version declared"** rather than silently
+blank — there is nothing to compare, and that should be visible to whoever is looking.
+
 ## What ownership is bound to
 
 Deliberately narrow:

@@ -388,8 +388,18 @@ function modulesPage() {
   const mods = listModules();
   const rows = mods.length ? mods.map((m) => `
     <div class="card row">
-      <div style="flex:1"><b>${esc(m.name)}</b> <span class="tag ${m.enabled ? 'on' : 'off'}">${m.enabled ? 'ENABLED' : 'disabled'}</span>
-        <div class="mut" style="font-size:12px">${esc(m.description)}</div>${(() => { const o = moduleOwner(m.id); return o ? `<div class="mut" style="font-size:11px;margin-top:3px">Updates automatically from <b>${esc(o.name)}</b> — revoke that agent to stop it</div>` : ''; })()}</div>
+      <div style="flex:1"><b>${esc(m.name)}</b>${m.version
+        ? ` <span class="mut" style="font-size:12px">v${esc(m.version)}</span>`
+        // A module that declares no version can't be checked against what its author
+        // shipped — say so rather than showing nothing.
+        : ` <span class="mut" style="font-size:11px" title="This module's manifest declares no version, so there is nothing to compare against the agent that ships it.">no version declared</span>`}
+        <span class="tag ${m.enabled ? 'on' : 'off'}">${m.enabled ? 'ENABLED' : 'disabled'}</span>
+        <div class="mut" style="font-size:12px">${esc(m.description)}</div>${(() => {
+          const o = moduleOwner(m.id);
+          if (!o) return '';
+          const when = o.updatedAt ? new Date(o.updatedAt).toLocaleString() : null;
+          return `<div class="mut" style="font-size:11px;margin-top:3px">Updates automatically from <b>${esc(o.name)}</b>${when ? ` · last update ${esc(when)}` : ''} — revoke that agent to stop it</div>`;
+        })()}</div>
       <form method=POST action="/modules/toggle"><input type=hidden name=id value="${esc(m.id)}"><input type=hidden name=enabled value="${m.enabled ? '0' : '1'}">
         <button class="${m.enabled ? '' : 'primary'}">${m.enabled ? 'Disable' : 'Enable'}</button></form>
       ${m.enabled ? `<a href="/modules/${esc(m.id)}"><button>${(() => { const mm = getModule(m.id); return mm && mm.ui && typeof mm.ui.handler === 'function' ? 'Configure' : 'Details'; })()} →</button></a>` : ''}

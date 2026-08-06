@@ -63,6 +63,19 @@ export async function loadModules() {
     if (mod.autoEnable && !isEnabled(id)) setEnabled(id, true);
   }
   if (seenChanged) save();
+
+  // Drop ownership claims for modules that are gone. Keyed on the FILE, not the
+  // registry: a module whose code currently fails to load still has a file, and its
+  // owner must not lose the right to ship the fix. Only a module whose file has
+  // actually been removed (deleted outside the UI, or by hand) releases its claim.
+  const owned = state.moduleOwners || {};
+  let dropped = 0;
+  for (const id of Object.keys(owned)) {
+    if (registry.has(id)) continue;
+    if (existsSync(join(MODULES_DIR, id + '.mjs'))) continue; // present but broken → keep
+    delete owned[id]; dropped++;
+  }
+  if (dropped) { console.log(`[modules] released ${dropped} ownership claim(s) for removed module(s)`); save(); }
 }
 
 // --- Module-install approval queue ------------------------------------------
@@ -122,7 +135,15 @@ export async function decideModuleInstall(reqId, approve) {
 // id, and only while the agent's grant still exists — revoking the agent ends it.
 function owners() { state.moduleOwners = state.moduleOwners || {}; return state.moduleOwners; }
 function claimModule(id, owner) {
-  owners()[id] = { client_id: owner.client_id, name: owner.name, since: owners()[id]?.since || Date.now() };
+  const prev = owners()[id];
+  owners()[id] = {
+    client_id: owner.client_id, name: owner.name,
+    since: prev?.since || Date.now(),
+    // What is actually installed right now, so a user can compare it against the
+    // version the agent believes it shipped.
+    version: (registry.get(id) && registry.get(id).version) || '',
+    updatedAt: Date.now(),
+  };
   save();
 }
 export function moduleOwner(id) { return owners()[id] || null; }
@@ -158,8 +179,10 @@ export async function agentInstallModule({ id, code, client_id, name }) {
     await loadModules();
     return { ok: false, error: `the uploaded code does not declare id "${id}" — reverted` };
   }
-  console.log(`[modules] "${id}" updated by ${name} (owner) — no approval needed`);
-  return { ok: true, applied: true, id, file: r.file };
+  claimModule(id, { client_id, name }); // refresh version + updatedAt
+  const version = (registry.get(id) && registry.get(id).version) || '';
+  console.log(`[modules] "${id}" updated by ${name} (owner) → v${version || '(no version declared)'}`);
+  return { ok: true, applied: true, id, version, file: r.file };
 }
 
 // Write a new/updated module file and reload. `code` is arbitrary JS that will
@@ -198,7 +221,7 @@ export async function deleteModule(id) {
 export function isEnabled(id) { return state.modulesEnabled.includes(id); }
 export function getModule(id) { return registry.get(id); }
 export function listModules() {
-  return [...registry.values()].map((m) => ({ id: m.id, name: m.name, description: m.description || '', enabled: isEnabled(m.id) }));
+  return [...registry.values()].map((m) => ({ id: m.id, name: m.name, description: m.description || '', version: m.version || '', enabled: isEnabled(m.id) }));
 }
 
 // Effective destination pattern-set = module-static patterns ∪ user-curated contents.
