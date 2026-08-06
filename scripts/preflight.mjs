@@ -191,6 +191,13 @@ const readIf = (p) => { try { return readFileSync(join(ROOT, p), 'utf8'); } catc
 // 9. Stale .gitignore entries — a rule that matches nothing is either a leftover or,
 //    worse, a rule someone believes is protecting a file that has since moved.
 // ---------------------------------------------------------------------------
+// Present only when the bridge has actually been RUN from this checkout, or when
+// another application has dropped its module in. Absent is the healthy state.
+const RUNTIME_ARTIFACTS = [
+  /(^|\/)\.bridge-state\.json$/,
+  /(^|\/)recordings$/,
+  /(^|\/)bridge\/modules\/[^/]+\.mjs$/,
+];
 {
   const lines = readIf('.gitignore').split('\n').map((s) => s.trim());
   const stale = [];
@@ -202,6 +209,12 @@ const readIf = (p) => { try { return readFileSync(join(ROOT, p), 'utf8'); } catc
     // case — the file it was written to protect may have moved and be unprotected.
     const body = l.replace(/\/$/, '');
     if (!body.includes('/')) continue;
+    // RUNTIME artifacts are expected to be absent from a clean checkout — that is the
+    // point of keeping dev separate from the installed app. Their rules must stay (a dev
+    // run recreates them, and another app may drop its module back in), so an absent
+    // file here is correct rather than stale. Flagging it trains people to ignore this
+    // check, which is how the real case — a protected file that MOVED — gets missed.
+    if (RUNTIME_ARTIFACTS.some((re) => re.test(body))) continue;
     if (!existsSync(join(ROOT, body))) stale.push(l);
   }
   if (stale.length) warn('gitignore', 'rule(s) match nothing on disk — leftover, or the file moved and is now UNPROTECTED', stale.join('\n'));

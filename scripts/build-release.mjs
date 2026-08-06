@@ -48,9 +48,19 @@ mkdirSync(STAGE, { recursive: true });
 // source of truth is another repo) is excluded by construction.
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files'], { encoding: 'utf8' })
   .split('\n').map((s) => s.trim()).filter(Boolean);
-const EXCLUDE = new Set(['Clean Browser Bridge.command']); // dev wipe tool — never ship it
+// Tracked-but-not-shipped: things that belong to DEVELOPING the bridge, not to running
+// it. A zip install is the finished application; release tooling and repo bookkeeping in
+// there is just clutter that invites someone to run the wrong thing. (A git-channel
+// install is a checkout by definition and keeps everything — that IS the dev copy.)
+const EXCLUDE = new Set([
+  'Clean Browser Bridge.command', // dev wipe tool — never ship it
+  'RELEASING.md',                 // how to cut a release; meaningless in an install
+  '.gitignore',                   // repo bookkeeping
+]);
+const EXCLUDE_DIRS = ['scripts/', '.github/']; // build/release tooling and CI
+const shipped = (rel) => !EXCLUDE.has(rel) && !EXCLUDE_DIRS.some((d) => rel.startsWith(d));
 for (const rel of tracked) {
-  if (EXCLUDE.has(rel)) continue;
+  if (!shipped(rel)) continue;
   const src = join(ROOT, rel);
   if (!existsSync(src)) continue;
   const dst = join(STAGE, rel);

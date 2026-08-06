@@ -101,7 +101,7 @@ Ignored in standalone mode.
   "url": "http://127.0.0.1:47830", "mcpUrl": "http://127.0.0.1:47830/mcp",
   "browserConnected": true,
   "agent": { "name": "AI Analyst", "lastSeen": 1785440000000, "active": true },
-  "modulesEnabled": ["ai-analyst"], "tabAccess": "all", "coreTools": []
+  "modulesEnabled": ["ai-analyst"], "tabAccess": "on", "coreTools": []
 }
 ```
 
@@ -141,9 +141,10 @@ anything". At boot an embedded bridge logs what it finds:
 - a module installed but **not enabled** (there is no UI to enable it — give it
   `autoEnable: true`)
 - **no** module enabled at all (deny-by-default means every call is refused)
-- **tab access left at `none`** (the deny-by-default start). Standalone the user fixes
+- **tab access left at its `off` default** (deny-by-default). Standalone the user fixes
   this at `/tabs`; embedded has no such UI, so the host must set `state.tabAccess`
-  itself when it provisions the install.
+  itself when it provisions the install:
+  `{ default: 'on'|'off', origins: { '<pattern>': true|false } }`.
 
 ## Access identity
 

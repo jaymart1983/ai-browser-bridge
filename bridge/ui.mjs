@@ -5,7 +5,8 @@
 import { state, save } from './state.mjs';
 import {
   tabAccess, setTabAccess, toggleOrigin, urlAllowed, matchPattern,
-  recordingCfg, storageFor, setStorageDefault, toggleStorage,
+  originSetting, setDefaultAccess, setOriginAccess, setManyAccess,
+  recordingCfg, storageFor, setStorageDefault, toggleStorage, setManyStorage,
 } from './tabaccess.mjs';
 import { listModules, setEnabled, getModule, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall, moduleOwner } from './modules.mjs';
 import { runModuleNow, isRunning } from './automation.mjs';
@@ -409,69 +410,104 @@ async function tabsPage() {
     .tgl .lbl.l{text-align:right}
     .tgl .lbl.r{text-align:left}
     td.tc,th.tc{text-align:center;width:1%;white-space:nowrap}
+    /* Tri-state column control: a switch whose knob can also sit in the middle.
+       Two invisible half-width buttons are the hit targets, so "click the side you
+       want" works without any JS. */
+    .tri{position:relative;display:inline-block;width:40px;height:22px;border-radius:22px;
+      background:var(--slider);vertical-align:middle;margin-left:6px}
+    .tri.s-on{background:var(--accent)}
+    .tri.s-mixed{background:linear-gradient(90deg,var(--slider) 50%,var(--accent) 50%)}
+    .tri form{position:absolute;top:0;height:100%;width:50%;margin:0;display:block}
+    .tri form:first-of-type{left:0} .tri form:nth-of-type(2){right:0}
+    .tri button{width:100%;height:100%;padding:0;border:0;background:transparent;cursor:pointer;border-radius:22px}
+    .tri button:hover{background:rgba(255,255,255,.14)}
+    .tri .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
+      background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);pointer-events:none;transition:left .15s}
+    .tri.s-off .knob{left:2px} .tri.s-mixed .knob{left:11px} .tri.s-on .knob{left:20px}
   </style>`;
 
   // Left label = off state, right label = on state, matching where the knob sits.
   const ON_OFF = ['Off', 'On'];
   const TMP_PERM = ['Tmp', 'Perm'];
 
-  const MODES = [
-    ['all', 'All tabs', 'Everything you have open, and anything you open later.'],
-    ['selected', 'Selected sites', 'Only the sites listed below.'],
-    ['none', 'Off', 'Nothing. Agents and modules are refused every tab.'],
-  ];
-  const modeCards = MODES.map(([m, label, hint]) => post('mode', { mode: m },
-    `<button class="btn ${t.mode === m ? 'on' : ''}" style="text-align:left;width:100%;padding:10px 12px">
-       <b>${esc(label)}</b><div class="mut" style="font-size:12px;font-weight:400;margin-top:2px">${esc(hint)}</div></button>`,
-    'flex:1;min-width:180px')).join('');
+  // Tri-state column control. The knob shows where the column stands — all left, all
+  // right, or centred when the tabs disagree — and the two halves are the actions:
+  // click the left half to set the whole column to the left value, the right half for
+  // the right value. A "mixed" column therefore tells you the truth AND offers both
+  // resolutions, which a plain checkbox cannot.
+  const triCell = (action, state3, labels) => `<span class="tri s-${state3}" title="${esc(labels[0])} / ${esc(labels[1])} — click a side to set the whole column">` +
+    post(action, { value: 'off' }, `<button aria-label="all ${esc(labels[0])}"></button>`, '') +
+    post(action, { value: 'on' }, `<button aria-label="all ${esc(labels[1])}"></button>`, '') +
+    '<span class="knob"></span></span>';
 
-  // Rows for the sites you've named, whether or not a tab is open on them right now —
-  // otherwise closing a tab would look like the permission had been revoked.
-  const siteRows = t.origins.length ? t.origins.map((o) => `<tr>
+  // What state is a column in? all / none / mixed, over the tabs actually listed.
+  const columnState = (vals) => !vals.length ? 'off'
+    : vals.every(Boolean) ? 'on' : vals.some(Boolean) ? 'mixed' : 'off';
+
+  const tabOrigins = [...new Set(httpTabs.map((x) => { try { return new URL(x.url).origin; } catch { return ''; } }).filter(Boolean))];
+  const accessVals = httpTabs.map((x) => urlAllowed(x.url).allow);
+  const storeVals = httpTabs.map((x) => storageFor(x.url) === 'perm');
+  const recVals = httpTabs.map((x) => recording.has(Number(x.tabId)));
+
+  // Sites you have named explicitly, whether or not a tab is open on them right now —
+  // otherwise closing a tab would look like the setting had been revoked.
+  const entries = Object.entries(t.origins);
+  const siteRows = entries.length ? entries.map(([o, on]) => `<tr>
       <td><code>${esc(o)}</code></td>
-      <td class="tc">${toggle('toggle', { origin: o }, true, ON_OFF)}</td>
-      <td class="mut" style="font-size:12px">${openTabs.some((x) => matchPattern(o, x.url || '')) ? 'open now' : '—'}</td></tr>`).join('')
-    : '<tr><td colspan=3 class="mut">No sites enabled. Add one below, or from an open tab.</td></tr>';
+      <td class="tc">${toggle('site', { origin: o }, on, ON_OFF)}</td>
+      <td class="mut" style="font-size:12px">${openTabs.some((x) => matchPattern(o, x.url || '')) ? 'open now' : '—'}
+        ${post('clear', { origin: o }, '<button class="btn" style="font-size:11px;padding:2px 7px">Use default</button>', 'margin-left:8px')}</td></tr>`).join('')
+    : `<tr><td colspan=3 class="mut">No exceptions — every site follows the default (<b>${t.default === 'on' ? 'On' : 'Off'}</b>).</td></tr>`;
 
   const tabRows = httpTabs.map((x) => {
     let origin = ''; try { origin = new URL(x.url).origin; } catch {}
     const on = urlAllowed(x.url).allow;
     const perm = storageFor(x.url) === 'perm';
     const isRec = recording.has(Number(x.tabId));
+    const explicit = originSetting(origin) !== null;
     const fav = x.favIconUrl
       ? `<img src="${esc(x.favIconUrl)}" style="width:15px;height:15px;border-radius:3px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'">` : '';
     return `<tr>
       <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
-        <div class="mut" style="font-size:11px">${esc(origin)}</div></td>
-      <td class="tc">${t.mode === 'selected'
-        ? toggle('toggle', { origin }, on, ON_OFF)
-        : dead(t.mode === 'all', ON_OFF)}</td>
+        <div class="mut" style="font-size:11px">${esc(origin)}${explicit ? ' · set explicitly' : ''}</div></td>
+      <td class="tc">${toggle('site', { origin }, on, ON_OFF)}</td>
       <td class="tc">${toggle('storage', { origin }, perm, TMP_PERM)}</td>
       <td class="tc">${toggle(isRec ? 'stoprec' : 'record', { tabId: x.tabId }, isRec, ON_OFF, 'rec')}</td></tr>`;
   }).join('') || '<tr><td colspan=4 class="mut">No http(s) tabs open.</td></tr>';
 
+  const th = (label, action, state3, labels) =>
+    `<th class="tc">${esc(label)}${httpTabs.length ? ' ' + triCell(action, state3, labels) : ''}</th>`;
+
   const body = `${TGL_CSS}
     <h2>Which tabs can be used</h2>
-    <p class="mut">Agents and scheduled modules can only act on tabs allowed here. A fresh install is <b>Off</b>.</p>
-    <div class="card"><div class="row" style="gap:8px;flex-wrap:wrap">${modeCards}</div></div>
+    <p class="mut">Agents and scheduled modules can only act on tabs turned on here. A fresh install is <b>Off</b>.</p>
 
-    <h2>Enabled sites</h2>
-    <div class="card"><table><thead><tr><th>Pattern</th><th class="tc">Enabled</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
-      ${post('add', {}, `<input name=origin placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site</button>`, 'margin-top:10px;display:block')}
-      <div class="mut" style="font-size:12px;margin-top:6px">Matches a host (<code>example.com</code>), a host wildcard
-        (<code>*.example.com</code>), an origin (<code>https://example.com</code>) or a URL prefix
-        (<code>https://example.com/app/*</code>). Adding a site switches you to <b>Selected sites</b>.</div></div>
+    <div class="card"><div class="row">
+      <span class="grow"><b>Default for new tabs</b>
+        <div class="mut" style="font-size:12px">What a site gets when you haven't set it either way. Individual tabs below always override this.</div></span>
+      ${toggle('default', {}, t.default === 'on', ON_OFF)}
+    </div></div>
 
     <h2>Open tabs</h2>
     <div class="card"><table>
-      <thead><tr><th>Tab</th><th class="tc">Access</th><th class="tc">Recording saved to</th><th class="tc">Record</th></tr></thead>
+      <thead><tr><th>Tab</th>
+        ${th('Access', 'allaccess', columnState(accessVals), ON_OFF)}
+        ${th('Recording saved to', 'allstorage', columnState(storeVals), TMP_PERM)}
+        ${th('Record', 'allrecord', columnState(recVals), ON_OFF)}</tr></thead>
       <tbody>${tabRows}</tbody></table>
-      <div class="mut" style="font-size:12px;margin-top:8px">${t.mode === 'selected' ? ''
-        : `Access is set to <b>${t.mode === 'all' ? 'All tabs' : 'Off'}</b> above, so per-tab switches are disabled. Choose <b>Selected sites</b> to control tabs individually.<br>`}Recordings
-        go to a temporary folder by default (<b>Tmp</b>, cleared by macOS) or are kept under
-        <code>browser-bridge/recordings</code> (<b>Perm</b>).
-        Default for new tabs: ${post('default', { value: rec.default === 'perm' ? 'tmp' : 'perm' },
-          `<button class="btn">${rec.default === 'perm' ? 'Perm' : 'Tmp'}</button>`)}</div></div>`;
+      <div class="mut" style="font-size:12px;margin-top:8px">The switch beside a column heading sets that whole column — click its left or
+        right half. It sits in the middle when the tabs disagree, and it only touches the tabs listed here, never the default.<br>
+        Recordings go to a temporary folder (<b>Tmp</b>, cleared by macOS) or are kept under <code>browser-bridge/recordings</code> (<b>Perm</b>).
+        Default for new recordings: ${post('default-storage', { value: rec.default === 'perm' ? 'tmp' : 'perm' },
+          `<button class="btn">${rec.default === 'perm' ? 'Perm' : 'Tmp'}</button>`)}</div></div>
+
+    <h2>Sites set explicitly</h2>
+    <div class="card"><table><thead><tr><th>Pattern</th><th class="tc">Access</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
+      ${post('add', {}, `<input name=origin placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site</button>`, 'margin-top:10px;display:block')}
+      <div class="mut" style="font-size:12px;margin-top:6px">Matches a host (<code>example.com</code>), a host wildcard
+        (<code>*.example.com</code>), an origin (<code>https://example.com</code>) or a URL prefix
+        (<code>https://example.com/app/*</code>). An entry here overrides the default in either direction, so you can run
+        "everything except this one" as easily as "nothing except this one".</div></div>`;
 
   return uiChrome('Tabs', body, '/tabs');
 }
@@ -653,16 +689,35 @@ export async function uiRoutes(req, res, url) {
   if (req.method === 'POST' && p === '/tabs') {
     const { form } = await readBody(req);
     const a = form.action;
-    if (a === 'mode') setTabAccess({ mode: String(form.mode || 'none') });
-    else if (a === 'toggle' && form.origin) toggleOrigin(String(form.origin).trim());
-    else if (a === 'add' && String(form.origin || '').trim()) {
-      const t = tabAccess();
-      const o = String(form.origin).trim();
-      if (!t.origins.includes(o)) setTabAccess({ mode: 'selected', origins: t.origins.concat([o]) });
-    } else if (a === 'storage' && form.origin) toggleStorage(String(form.origin));
-    else if (a === 'default') setStorageDefault(String(form.value || 'tmp'));
-    else if (a === 'record' || a === 'stoprec') {
-      const ctx = getModuleCtx();
+    const ctx = getModuleCtx();
+    // The origins currently on screen — what a column-header action applies to. Read
+    // fresh rather than trusting the form, so a bulk click can never act on a stale list.
+    const openOrigins = async () => {
+      let tabs = [];
+      try { tabs = (await ctx.relayCommand('tabs.list')) || []; } catch {}
+      return [...new Set(tabs.map((x) => { try { return new URL(x.url).origin; } catch { return ''; } })
+        .filter((o) => o && /^https?:/.test(o)))];
+    };
+
+    if (a === 'default') setDefaultAccess(tabAccess().default !== 'on');
+    else if (a === 'site' && form.origin) toggleOrigin(String(form.origin).trim());
+    else if (a === 'clear' && form.origin) setOriginAccess(String(form.origin).trim(), null);
+    else if (a === 'add' && String(form.origin || '').trim()) setOriginAccess(String(form.origin).trim(), true);
+    else if (a === 'storage' && form.origin) toggleStorage(String(form.origin));
+    else if (a === 'default-storage') setStorageDefault(String(form.value || 'tmp'));
+    else if (a === 'allaccess') setManyAccess(await openOrigins(), form.value === 'on');
+    else if (a === 'allstorage') setManyStorage(await openOrigins(), form.value === 'on' ? 'perm' : 'tmp');
+    else if (a === 'allrecord') {
+      let tabs = [];
+      try { tabs = (await ctx.relayCommand('tabs.list')) || []; } catch {}
+      const live = new Set((((await ctx.relayCommand('monitor.list').catch(() => [])) || [])).map((m) => Number(m.tabId)));
+      const want = form.value === 'on';
+      for (const x of tabs.filter((y) => /^https?:/.test(y.url || ''))) {
+        const isRec = live.has(Number(x.tabId));
+        if (isRec === want) continue;
+        try { await ctx.relayCommand(want ? 'monitor.start' : 'monitor.stop', { tabId: x.tabId }); } catch {}
+      }
+    } else if (a === 'record' || a === 'stoprec') {
       try { await ctx.relayCommand(a === 'record' ? 'monitor.start' : 'monitor.stop', { tabId: Number(form.tabId) }); } catch {}
     }
     redirect(res, '/tabs'); return true;

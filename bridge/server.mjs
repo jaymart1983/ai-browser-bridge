@@ -32,7 +32,7 @@ import { startTray, setTrayState, stopTray, refreshTrayMenu } from './tray.mjs';
 import { oauthHandle, validateToken, wwwAuthenticate, listAgents, listPending, listStale, revokeAgent, removeClient, configureOAuth } from './oauth.mjs';
 import { mcpHandle, coreToolNames } from './mcp.mjs';
 import { pairInit, signFrame, unpairBrowser, pairingStatus, listBrowsers, setActiveBrowser, renameBrowser, touchBrowser, adoptLegacyForBrowser, verifyMark, configureEmbeddedPairing, verifyDecision, setBrowserMeta } from './pairing.mjs';
-import { configureTabAccess, resolveTabUrl, tabAccess, setTabAccess, toggleOrigin, recordingCfg, storageFor } from './tabaccess.mjs';
+import { configureTabAccess, resolveTabUrl, tabAccess, setTabAccess, toggleOrigin, setDefaultAccess, recordingCfg, storageFor } from './tabaccess.mjs';
 import { configureAutomation, startAutomation, noteBrowserActivity, runModuleNow, runningModules } from './automation.mjs';
 import { configureModules, loadModules } from './modules.mjs';
 import { uiRoutes } from './ui.mjs';
@@ -142,7 +142,7 @@ function embeddedStatusPayload() {
     modulesEnabled: [...(state.modulesEnabled || [])],
     // 2.0: the one access fact worth reporting. `none` here explains every refusal a
     // host is about to see, which "rules: 0" never did.
-    tabAccess: tabAccess().mode,
+    tabAccess: tabAccess().default,
     coreTools: CORE_TOOLS_ALLOW ? [...CORE_TOOLS_ALLOW] : 'all',
   };
 }
@@ -395,7 +395,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/bridge/tabaccess') {
     return readJsonBody(req).then((b) => sendJson(res, 200,
-      b && b.origin ? toggleOrigin(String(b.origin)) : setTabAccess(b || {})));
+      b && b.origin ? toggleOrigin(String(b.origin))
+        : b && (b.default === 'on' || b.default === 'off') && !b.origins ? setDefaultAccess(b.default === 'on')
+        : setTabAccess(b || {})));
   }
   if (req.method === 'POST' && url.pathname === '/bridge/module/install') {
     const grant = validateToken(req.headers.authorization, req);

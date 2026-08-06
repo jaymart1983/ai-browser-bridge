@@ -22,10 +22,11 @@ There are two halves:
 An authorized agent gets the full set of primitives: list tabs, read a page,
 click, fill, scroll, navigate, open and close tabs, upload and download files,
 record a tab to disk, and annotate over the page. There is one access control,
-and it is the one worth having: **which sites are in scope**. You set it under
-Tabs — All, a list you choose, or Off — and it is Off on a fresh install. A call
-against a site you have not enabled is refused, whether it comes from an agent
-or from a module.
+and it is the one worth having: **which sites are in scope**. Under Tabs you set a
+default for sites you have not decided about (Off on a fresh install), and you can
+turn any individual site on or off regardless of that default — so "everything
+except my bank" and "nothing except this one site" are both one click. A call
+against a site that is off is refused, whether it comes from an agent or a module.
 
 ## Automations (modules)
 

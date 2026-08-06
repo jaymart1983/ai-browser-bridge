@@ -7,7 +7,7 @@
 // about: which sites are in scope. Modules are checked identically — a module
 // cannot reach a tab the user hasn't enabled.
 //
-// Deny-by-default: a fresh install is `none` and grants nothing until the user says so.
+// Deny-by-default: a fresh install has default `off` and grants nothing until you say so.
 
 import { state, save } from './state.mjs';
 
@@ -43,48 +43,119 @@ export function matchPattern(pattern, url) {
 }
 
 // --- The setting -------------------------------------------------------------
+// A DEFAULT plus per-site OVERRIDES, rather than a mode that swallows the per-tab
+// controls. The old three-mode setting conflated two different things: "what should a
+// site I haven't decided about get" and "turn everything on/off right now". Picking
+// "All tabs" then disabled every individual switch, so there was no way to say
+// "everything except this one" — and no way to say "nothing except this one" without
+// hunting for the right mode first. Now the default answers the first question, an
+// explicit override answers the second, and both directions work.
+//
+// `origins` is a map pattern -> true|false, and an entry SURVIVES even when it happens to
+// agree with the current default. Auto-dropping redundant entries looked tidy but lost
+// real decisions: turn the default off for an hour ("pause everything"), turn it back on,
+// and the site you had deliberately excluded would silently be allowed again. An explicit
+// setting is only removed when you explicitly clear it ("Use default").
 export function tabAccess() {
-  const t = state.tabAccess || (state.tabAccess = { mode: 'none', origins: [] });
-  if (!Array.isArray(t.origins)) t.origins = [];
-  if (!['all', 'selected', 'none'].includes(t.mode)) t.mode = 'none';
+  const t = state.tabAccess || (state.tabAccess = { default: 'off', origins: {} });
+  // Migrate the 2.0.0–2.0.5 shape (mode + array) in place.
+  if (t.mode) {
+    const list = Array.isArray(t.origins) ? t.origins : [];
+    t.default = t.mode === 'all' ? 'on' : 'off';
+    t.origins = {};
+    if (t.mode === 'selected') for (const p of list) t.origins[p] = true;
+    delete t.mode;
+    save();
+  }
+  if (t.default !== 'on') t.default = 'off';
+  if (!t.origins || typeof t.origins !== 'object' || Array.isArray(t.origins)) t.origins = {};
   return t;
 }
 
-export function setTabAccess({ mode, origins }) {
+const defaultOn = () => tabAccess().default === 'on';
+
+// The explicit setting for a pattern, or null when it just follows the default.
+export function originSetting(pattern) {
+  const v = tabAccess().origins[pattern];
+  return typeof v === 'boolean' ? v : null;
+}
+
+export function setDefaultAccess(on) {
   const t = tabAccess();
-  if (mode && ['all', 'selected', 'none'].includes(mode)) t.mode = mode;
-  if (Array.isArray(origins)) t.origins = origins.map(String).filter(Boolean).slice(0, 200);
+  t.default = on ? 'on' : 'off';
+  // Explicit per-site settings are NOT pruned here — see the note above.
   save();
   return { ok: true, tabAccess: { ...t } };
 }
 
-// Add/remove one origin pattern, flipping into `selected` so the click does what it looks
-// like it does rather than silently having no effect while the mode says none/all.
-export function toggleOrigin(origin) {
+// Set one site explicitly. Passing null clears the override (back to following default).
+export function setOriginAccess(pattern, on) {
   const t = tabAccess();
-  const o = String(origin || '').trim();
-  if (!o) return { ok: false, error: 'origin required' };
-  if (t.mode !== 'selected') { t.mode = 'selected'; if (!t.origins.length && o) t.origins = []; }
-  const i = t.origins.indexOf(o);
-  if (i >= 0) t.origins.splice(i, 1); else t.origins.push(o);
+  const p = String(pattern || '').trim();
+  if (!p) return { ok: false, error: 'origin required' };
+  if (on === null) delete t.origins[p]; // "Use default" — the only way to forget a site
+  else t.origins[p] = !!on;
+  if (Object.keys(t.origins).length > 400) return { ok: false, error: 'too many site overrides' };
+  save();
+  return { ok: true, tabAccess: { ...t } };
+}
+
+export function toggleOrigin(pattern) {
+  const cur = originSetting(pattern);
+  const effective = cur === null ? defaultOn() : cur;
+  return setOriginAccess(pattern, !effective);
+}
+
+// Bulk: force every listed site to on/off. Used by the column header control, which
+// operates on exactly the tabs currently listed — not on the default, so a bulk action
+// never silently changes what future tabs get.
+export function setManyAccess(patterns, on) {
+  for (const p of patterns) setOriginAccess(p, on);
+  return { ok: true, tabAccess: { ...tabAccess() } };
+}
+
+// Kept for the /bridge/tabaccess POST body and tests.
+export function setTabAccess({ default: dflt, origins }) {
+  const t = tabAccess();
+  if (dflt === 'on' || dflt === 'off') t.default = dflt;
+  if (origins && typeof origins === 'object' && !Array.isArray(origins)) {
+    t.origins = {};
+    for (const [k, v] of Object.entries(origins)) if (typeof v === 'boolean') t.origins[String(k)] = v;
+  }
   save();
   return { ok: true, tabAccess: { ...t } };
 }
 
 // --- The check ---------------------------------------------------------------
 // `url` may be null for calls that target no particular tab (tabs.list, monitor.list…).
-// Those are allowed whenever access isn't fully off; their RESULTS are filtered by the
-// caller so a disabled tab is never revealed.
+// Those are allowed whenever anything at all is reachable; their RESULTS are filtered by
+// the caller so a disabled tab is never revealed.
 export function urlAllowed(url) {
   const t = tabAccess();
-  if (t.mode === 'none') return { allow: false, reason: 'tab access is off — enable tabs in the control panel' };
-  if (t.mode === 'all') return { allow: true, reason: 'all tabs enabled' };
-  if (!url) return { allow: true, reason: 'no specific tab' };
-  const hit = t.origins.find((p) => matchPattern(p, url));
-  return hit
-    ? { allow: true, reason: `matches ${hit}` }
-    : { allow: false, reason: `${safeHost(url)} is not an enabled tab — add it in the control panel` };
+  const on = t.default === 'on';
+  if (!url) {
+    // Nothing reachable at all = deny even the untargeted calls, so "off" really is off.
+    const anyAllowed = on || Object.values(t.origins).some(Boolean);
+    return anyAllowed
+      ? { allow: true, reason: 'no specific tab' }
+      : { allow: false, reason: 'tab access is off — turn on tabs in the control panel' };
+  }
+  // An explicit setting always wins over the default, in both directions. When SEVERAL
+  // patterns match, the most specific one wins (longest pattern), and a tie goes to deny
+  // — otherwise the answer would depend on the order entries happened to be added, which
+  // is not something anyone can reason about for a security setting.
+  const hits = Object.keys(t.origins).filter((p) => matchPattern(p, url));
+  if (hits.length) {
+    hits.sort((a, b) => (b.length - a.length) || (t.origins[a] === t.origins[b] ? 0 : t.origins[a] ? 1 : -1));
+    const win = hits[0];
+    return t.origins[win]
+      ? { allow: true, reason: `matches ${win}` }
+      : { allow: false, reason: `${safeHost(url)} is turned off (${win})` };
+  }
+  if (on) return { allow: true, reason: 'default is on' };
+  return { allow: false, reason: `${safeHost(url)} is not turned on — enable it in the control panel` };
 }
+
 const safeHost = (u) => { try { return new URL(u).host; } catch { return String(u || '').slice(0, 60); } };
 
 // --- Recording storage class -------------------------------------------------
@@ -119,11 +190,24 @@ export function toggleStorage(origin) {
   const r = recordingCfg();
   const o = String(origin || '').trim();
   if (!o) return { ok: false, error: 'origin required' };
-  const cur = r.byOrigin[o] || r.default;
-  const next = cur === 'perm' ? 'tmp' : 'perm';
-  if (next === r.default) delete r.byOrigin[o]; else r.byOrigin[o] = next;
+  return setStorageFor(o, (r.byOrigin[o] || r.default) === 'perm' ? 'tmp' : 'perm');
+}
+
+export function setStorageFor(origin, value) {
+  const r = recordingCfg();
+  const o = String(origin || '').trim();
+  if (!o) return { ok: false, error: 'origin required' };
+  const v = value === 'perm' ? 'perm' : 'tmp';
+  if (v === r.default) delete r.byOrigin[o]; else r.byOrigin[o] = v;
   save();
   return { ok: true, recording: { ...r } };
+}
+
+// Bulk, for the storage column header. Same rule as access: acts on the listed sites,
+// never on the default.
+export function setManyStorage(origins, value) {
+  for (const o of origins) setStorageFor(o, value);
+  return { ok: true, recording: { ...recordingCfg() } };
 }
 
 // --- tabId → URL resolution (small cache over relayed tabs.list) -------------

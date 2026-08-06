@@ -28,7 +28,7 @@ export const state = {
 
   // Which tabs may be touched at all — the one access control in 2.0, replacing the
   // rules engine. Deny-by-default: a fresh install grants nothing.
-  tabAccess: { mode: 'none', origins: [] }, // mode: 'all' | 'selected' | 'none'
+  tabAccess: { default: 'off', origins: {} }, // default for undecided sites + per-site overrides
   recording: { default: 'tmp', byOrigin: {} }, // where a tab's recording is saved
 
   // Modules — scheduled automations, not an agent tool surface.
@@ -64,8 +64,8 @@ export function load() {
           .flatMap((x) => (x && Array.isArray(x.contents) ? x.contents : []));
         if (contents.length) {
           state.tabAccess = contents.includes('*')
-            ? { mode: 'all', origins: [] }
-            : { mode: 'selected', origins: [...new Set(contents)] };
+            ? { default: 'on', origins: {} }
+            : { default: 'off', origins: Object.fromEntries([...new Set(contents)].map((p) => [p, true])) };
         }
       }
       if (RETIRED.some((k) => k in d)) queueMicrotask(save); // rewrite the file without them
