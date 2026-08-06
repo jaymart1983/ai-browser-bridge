@@ -59,6 +59,7 @@ const EXCLUDE = new Set([
 ]);
 const EXCLUDE_DIRS = ['scripts/', '.github/']; // build/release tooling and CI
 const shipped = (rel) => !EXCLUDE.has(rel) && !EXCLUDE_DIRS.some((d) => rel.startsWith(d));
+const manifest = [];
 for (const rel of tracked) {
   if (!shipped(rel)) continue;
   const src = join(ROOT, rel);
@@ -66,7 +67,16 @@ for (const rel of tracked) {
   const dst = join(STAGE, rel);
   mkdirSync(dirname(dst), { recursive: true });
   copyFileSync(src, dst);
+  manifest.push(rel);
 }
+
+// The list of files this release ships. The zip updater copies the payload OVER the
+// install, which updates and adds but never removes — so a file dropped from a release
+// lingered in every existing install forever (a dead bridge/rules.mjs survived the 2.0
+// upgrade this way). With a manifest the updater can diff old against new and delete
+// exactly what this project stopped shipping, and nothing else.
+manifest.sort();
+writeFileSync(join(STAGE, '.shipped.json'), JSON.stringify({ version, files: manifest }, null, 0) + '\n');
 
 // GUARD: every relative import in the STAGED code must resolve to a file that
 // actually made it into the payload. This catches an untracked / uncommitted source

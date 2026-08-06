@@ -19,7 +19,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { state, save } from './state.mjs';
 
@@ -165,6 +165,32 @@ export async function getZipStatus() {
   return { channel: 'zip', version, platform, repo: rt.repo || '', nodePinned: rt.node || '', nodeRunning: process.versions.node, latest: latestVersion, updateAvailable: !!(behind && assetUrl), assetUrl, autoUpdate: getAutoUpdate(), checkedAt: Date.now(), error, warning };
 }
 
+// Delete files the previous release shipped and this one does not.
+//
+// Deliberately narrow. It reads the manifest ALREADY INSTALLED (written by the release
+// it came from), compares it with the incoming one, and unlinks only paths present in
+// the old list and absent from the new. A path the user created, a state file, a
+// recording, the Node runtime — none of them appear in either manifest, so none can be
+// touched. Anything outside the install dir is refused outright.
+function pruneRemovedFiles(newManifestPath) {
+  const oldPath = join(REPO_DIR, '.shipped.json');
+  let oldList = [], newList = [];
+  try { oldList = JSON.parse(readFileSync(oldPath, 'utf8')).files || []; } catch { return; } // pre-manifest install: nothing to diff
+  try { newList = JSON.parse(readFileSync(newManifestPath, 'utf8')).files || []; } catch { return; }
+  if (!Array.isArray(oldList) || !Array.isArray(newList) || !newList.length) return;
+  const keep = new Set(newList);
+  const root = resolve(REPO_DIR);
+  let removed = 0;
+  for (const rel of oldList) {
+    if (keep.has(rel)) continue;
+    const abs = resolve(join(REPO_DIR, rel));
+    // Never escape the install dir, whatever the manifest says.
+    if (abs !== root && !abs.startsWith(root + sep)) continue;
+    try { if (existsSync(abs)) { rmSync(abs, { force: true }); removed++; } } catch {}
+  }
+  if (removed) log(`removed ${removed} file(s) no longer shipped`);
+}
+
 // Download + swap in place. State/recordings/runtime aren't in the zip, so copying
 // the payload over the install dir preserves them. Restarts to load new code.
 async function applyZipUpdate() {
@@ -184,6 +210,12 @@ async function applyZipUpdate() {
     const nodeChanged = !!(newRt.node && newRt.node !== process.versions.node);
     // Swap the app payload over the install dir (never touches runtime/ or state — not in the zip).
     cpSync(src, REPO_DIR, { recursive: true, force: true });
+    // …then remove what this release STOPPED shipping. cpSync only adds and overwrites,
+    // so without this a file dropped from the project survives in every existing install
+    // forever — that is how a dead bridge/rules.mjs outlived the 2.0 upgrade. Strictly
+    // bounded: a path is deleted only if the PREVIOUS release shipped it and the new one
+    // does not, so state, recordings, runtime/ and anything the user added are untouched.
+    pruneRemovedFiles(join(src, '.shipped.json'));
     if (nodeChanged) { try { await updateNodeRuntime(newRt.node); } catch (e) { log('runtime update failed:', e && e.message); } }
     if (onExtensionUpdated) { try { onExtensionUpdated(); } catch {} }
     log('zip-updated to v' + st.latest + (nodeChanged ? ' + Node ' + newRt.node : '') + '; restarting');
