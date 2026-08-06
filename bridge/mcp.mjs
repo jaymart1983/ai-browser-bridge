@@ -99,7 +99,7 @@ function coreToolAllowed(ctx, name) {
 }
 
 const PROTOCOL_DEFAULT = '2025-06-18';
-const SERVER_INFO = { name: 'browser-bridge', version: '2.1.0' };
+const SERVER_INFO = { name: 'browser-bridge', version: '2.1.1' };
 
 // tool name -> { description, inputSchema, method (bridge command), map(args)->params }
 const TOOLS = {

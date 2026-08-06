@@ -378,7 +378,7 @@ function configPage() {
 // Read top to bottom. The first row that has an opinion about a capability decides it
 // and LOCKS the per-tab switch for it; the bottom row is the default, which decides
 // anything unmatched but leaves per-tab switches free.
-async function tabsPage() {
+async function tabsPage(err = '') {
   const t = tabAccess();
   const ctx = getModuleCtx();
 
@@ -390,89 +390,72 @@ async function tabsPage() {
     `<form method=POST action="/tabs" style="display:inline-block;margin:0;${style}"><input type=hidden name=action value="${action}">` +
     Object.entries(extra).map(([k, v]) => `<input type=hidden name="${k}" value="${esc(v)}">`).join('') + inner + '</form>';
 
-  // Switch geometry lives here rather than in the shared shell because only this page
-  // uses it. Both label slots are always rendered at the same fixed width and only one
-  // carries text, so a cell is the same size in either state — flipping a switch must
-  // not resize the column under the pointer.
+  // ONE control shape for the whole page: a pill with the state word centred in it and
+  // the knob at the position that word means. The old split — a switch with the label
+  // beside it — made the same fact look like two different controls depending on which
+  // table it was in, and the labels changed the cell width as they changed. Everything
+  // here is the same width in every state, so nothing shifts when you click it.
   const TGL_CSS = `<style>
-    .tgl{display:inline-flex;align-items:center;gap:6px}
-    .tgl .lbl{font-size:11px;color:var(--mut);width:34px;display:inline-block}
-    .tgl .lbl.l{text-align:right}
-    .tgl .lbl.r{text-align:left}
-    td.tc,th.tc{text-align:center;width:1%;white-space:nowrap}
-    /* Column header: a switch whose knob can also sit in the middle. Two invisible
-       half-width buttons are the hit targets, so "click the side you want" needs no JS. */
-    .tri{position:relative;display:inline-block;width:40px;height:22px;border-radius:22px;
-      background:var(--slider);vertical-align:middle;margin-left:6px}
-    .tri.s-on{background:var(--accent)}
-    .tri.s-mixed{background:linear-gradient(90deg,var(--slider) 50%,var(--accent) 50%)}
-    .tri form{position:absolute;top:0;height:100%;width:50%;margin:0;display:block}
-    .tri form:first-of-type{left:0} .tri form:nth-of-type(2){right:0}
-    .tri button{width:100%;height:100%;padding:0;border:0;background:transparent;cursor:pointer;border-radius:22px}
-    .tri button:hover{background:rgba(255,255,255,.14)}
-    .tri .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
-      background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);pointer-events:none;transition:left .15s}
-    .tri.s-off .knob{left:2px} .tri.s-mixed .knob{left:11px} .tri.s-on .knob{left:20px}
-    /* Three-position control for a RULE row: Off / N/A / On. A button rather than a
-       switch, because it cycles rather than flips and the current word has to be readable
-       at a glance — a knob alone cannot say "N/A". */
-    button.tri3{position:relative;width:74px;height:24px;padding:0;border-radius:24px;
-      background:var(--slider);border:1px solid var(--line);font-size:11px;font-weight:600;overflow:hidden}
-    button.tri3 .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
-      background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:left .15s}
-    button.tri3.s-off .knob{left:2px} button.tri3.s-na .knob{left:27px} button.tri3.s-on .knob{left:52px}
-    button.tri3 .t3l{position:absolute;left:0;right:0;top:0;line-height:22px;text-align:center;pointer-events:none}
-    button.tri3.s-on{background:var(--accent);color:#fff}
-    button.tri3.s-na{background:transparent;color:var(--mut)}
+    .pill{position:relative;display:inline-block;width:72px;height:24px;border-radius:24px;
+      background:var(--slider);border:1px solid var(--line);font-size:11px;font-weight:600;
+      vertical-align:middle;overflow:hidden;color:var(--fg)}
+    .pill.s-on{background:var(--accent);border-color:var(--accent);color:#fff}
+    .pill.s-na{background:transparent;color:var(--mut)}
+    .pill.s-mixed{background:linear-gradient(90deg,var(--slider) 50%,var(--accent) 50%)}
+    .pill .knob{position:absolute;top:2px;width:18px;height:18px;border-radius:50%;
+      background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:left .15s;pointer-events:none}
+    .pill.s-off .knob{left:2px} .pill.s-na .knob{left:26px} .pill.s-mixed .knob{left:26px} .pill.s-on .knob{left:50px}
+    /* th sets uppercase + letter-spacing for column names; the pill's own label must not
+       inherit it, or a header pill reads "ON" while the identical one a row below reads "On". */
+    .pill .plbl{position:absolute;inset:0;line-height:22px;text-align:center;pointer-events:none;
+      text-transform:none;letter-spacing:0;font-weight:600}
+    /* Whole-pill click target (cycle / toggle) */
+    button.pill{padding:0;cursor:pointer}
+    button.pill:hover{filter:brightness(1.08)}
+    button.pill:disabled{opacity:.55;cursor:default;filter:none}
+    /* Split click target: left half sets the low value, right half the high one. Used by
+       the column headers, which is why they can show "mixed" AND offer both resolutions. */
+    .pill form{position:absolute;top:0;height:100%;width:50%;margin:0;display:block;z-index:1}
+    .pill form:first-of-type{left:0} .pill form:nth-of-type(2){right:0}
+    .pill form button{width:100%;height:100%;padding:0;border:0;background:transparent;cursor:pointer}
+    .pill form button:hover{background:rgba(255,255,255,.14)}
+    /* Right-justified so a column heading's pill sits directly above the tab pills. */
+    td.tc,th.tc{text-align:right;width:1%;white-space:nowrap}
+    th.tc .pill{margin-left:8px}
     button.btn.ic{padding:2px 8px;font-size:12px;line-height:1.4}
     tr.defrow td{background:rgba(127,127,127,.07)}
-    .lockedcell{opacity:.62}
+    .pathrow input{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   </style>`;
+
+  // state: 'on' | 'off' | 'na' | 'mixed'
+  const pill = (state3, label, inner = '') =>
+    `<span class="pill s-${state3}">${inner}<span class="knob"></span><span class="plbl">${esc(label)}</span></span>`;
+  const pillBtn = (state3, label, title, disabled = false) =>
+    `<button class="pill s-${state3}" title="${esc(title)}" ${disabled ? 'disabled' : ''}><span class="knob"></span><span class="plbl">${esc(label)}</span></button>`;
 
   const CAPCOLS = [
     ['read', 'Read', 'See the page: text, accessibility tree, screenshots.'],
     ['control', 'Control', 'Act on the page: click, type, scroll, navigate, upload, download, run JS. Typing counts as control because filling a field can submit it.'],
     ['record', 'Record', 'Capture network responses and screenshots to disk.'],
-    ['annotate', 'Annotate', 'Draw the agent\'s notes over the page.'],
+    ['annotate', 'Annotate', "Draw the agent's notes over the page."],
   ];
 
-  // --- controls ---------------------------------------------------------------
-  // Binary switch with the label on the side the knob is on (see TGL_CSS).
-  const sw = (on, cls, live) =>
-    `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} ${live ? 'onchange="this.form.submit()"' : 'disabled'}><span class="slider"></span></label>`;
-  const cell = (on, labels, inner, extraNote = '') =>
-    `<span class="tgl"><span class="lbl l">${on ? '' : esc(labels[0])}</span>${inner}<span class="lbl r">${on ? esc(labels[1]) : ''}</span>${extraNote}</span>`;
-  const toggle = (action, extra, on, labels, cls = '') =>
-    post(action, extra, cell(on, labels, sw(on, cls, true)), 'vertical-align:middle');
-  // A switch that is SET BY A RULE: shown at its real value, disabled, with the pattern
-  // in the tooltip so "why can't I change this" is answerable without hunting.
-  const locked = (on, labels, why) =>
-    `<span class="tgl lockedcell" title="Set by the rule ${esc(why)} above — change it there">` +
-    `<span class="lbl l">${on ? '' : esc(labels[0])}</span>${sw(on, '', false)}<span class="lbl r">${on ? esc(labels[1]) : ''}</span></span>`;
-
-  // Three-position control for a RULE row: Off / N/A / On. N/A is the middle and means
-  // "this rule says nothing about this capability", so evaluation falls through.
-  const tri = (id, cap, v, labels) => {
-    const state3 = v === true ? 'on' : v === false ? 'off' : 'na';
-    return post('rulecap', { id, cap },
-      `<button class="tri3 s-${state3}" title="${esc(labels[0])} / N/A / ${esc(labels[1])} — click to cycle">
-         <span class="knob"></span><span class="t3l">${state3 === 'off' ? esc(labels[0]) : state3 === 'na' ? 'N/A' : esc(labels[1])}</span></button>`);
-  };
-
-  // --- rules table ------------------------------------------------------------
+  // --- rule rows: three-state (On / N/A / Off), one click cycles ---------------
   const ruleRows = t.rules.map((r, i) => {
     const readOff = r.caps.read === false;
+    const capCell = (c) => {
+      if (c !== 'read' && readOff) return pillBtn('off', 'Off', 'This rule turns read off, so nothing else can apply', true);
+      const v = r.caps[c];
+      const st = v === true ? 'on' : v === false ? 'off' : 'na';
+      return post('rulecap', { id: r.id, cap: c },
+        pillBtn(st, st === 'on' ? 'On' : st === 'off' ? 'Off' : 'N/A', 'Click to cycle: On → Off → N/A'));
+    };
+    const stoSt = r.storage === 'perm' ? 'on' : r.storage === 'tmp' ? 'off' : 'na';
     return `<tr>
-      <td style="white-space:nowrap">
-        <div class="mut" style="font-size:11px">${i + 1}</div>
-        <code>${esc(r.pattern)}</code></td>
-      ${CAPCOLS.map(([c]) => `<td class="tc">${
-        c !== 'read' && readOff
-          ? `<span class="tgl lockedcell" title="This rule turns read off, so nothing else can apply"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`
-          : tri(r.id, c, r.caps[c], ['Off', 'On'])}</td>`).join('')}
+      <td style="white-space:nowrap"><div class="mut" style="font-size:11px">${i + 1}</div><code>${esc(r.pattern)}</code></td>
+      ${CAPCOLS.map(([c]) => `<td class="tc">${capCell(c)}</td>`).join('')}
       <td class="tc">${post('rulestorage', { id: r.id },
-        `<button class="tri3 s-${r.storage === 'perm' ? 'on' : r.storage === 'tmp' ? 'off' : 'na'}" title="Tmp / N/A / Perm — click to cycle">
-           <span class="knob"></span><span class="t3l">${r.storage === 'perm' ? 'Perm' : r.storage === 'tmp' ? 'Tmp' : 'N/A'}</span></button>`)}</td>
+        pillBtn(stoSt, stoSt === 'on' ? 'Perm' : stoSt === 'off' ? 'Tmp' : 'N/A', 'Click to cycle: Tmp → Perm → N/A'))}</td>
       <td class="tc" style="white-space:nowrap">
         ${post('ruleup', { id: r.id }, `<button class="btn ic" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>`)}
         ${post('ruledown', { id: r.id }, `<button class="btn ic" ${i === t.rules.length - 1 ? 'disabled' : ''} title="Move down">↓</button>`)}
@@ -480,62 +463,80 @@ async function tabsPage() {
   }).join('');
 
   // The default is the LAST row of the same table — it is the bottom line of the same
-  // evaluation, and showing it anywhere else would hide that.
+  // evaluation, and showing it anywhere else would hide that. Two-state, never N/A:
+  // something has to decide.
   const defRow = `<tr class="defrow">
     <td><b>Everything else</b><div class="mut" style="font-size:11px">the default — applies when no rule above matched</div></td>
     ${CAPCOLS.map(([c]) => `<td class="tc">${
       c !== 'read' && !t.default.read
-        ? `<span class="tgl lockedcell" title="Read is off by default, so nothing else applies"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`
-        : toggle('defcap', { cap: c }, t.default[c], ['Off', 'On'])}</td>`).join('')}
-    <td class="tc">${toggle('defstorage', {}, t.default.storage === 'perm', ['Tmp', 'Perm'])}</td>
+        ? pillBtn('off', 'Off', 'Read is off by default, so nothing else applies', true)
+        : post('defcap', { cap: c }, pillBtn(t.default[c] ? 'on' : 'off', t.default[c] ? 'On' : 'Off', 'Click to change'))}</td>`).join('')}
+    <td class="tc">${post('defstorage', {}, pillBtn(t.default.storage === 'perm' ? 'on' : 'off', t.default.storage === 'perm' ? 'Perm' : 'Tmp', 'Click to change'))}</td>
     <td></td></tr>`;
 
-  // --- open tabs table --------------------------------------------------------
-  const tabOrigins = [...new Set(httpTabs.map((x) => { try { return new URL(x.url).origin; } catch { return ''; } }).filter(Boolean))];
+  // --- open tabs --------------------------------------------------------------
   const colState = (cap) => {
-    const vals = httpTabs.map((x) => resolveAccess(x.url)[cap].value);
+    const vals = httpTabs.map((x) => (cap === 'storage' ? resolveAccess(x.url).storage.value === 'perm' : resolveAccess(x.url)[cap].value));
     if (!vals.length) return 'off';
     return vals.every(Boolean) ? 'on' : vals.some(Boolean) ? 'mixed' : 'off';
   };
-  const triCell = (action, state3, labels) =>
-    `<span class="tri s-${state3}" title="${esc(labels[0])} / ${esc(labels[1])} — click a side to set the whole column">` +
-    post(action, { value: 'off' }, `<button aria-label="all ${esc(labels[0])}"></button>`, '') +
-    post(action, { value: 'on' }, `<button aria-label="all ${esc(labels[1])}"></button>`, '') +
-    '<span class="knob"></span></span>';
+  // Split pill: left half sets the low value, right half the high one, and the word in
+  // the middle says where the column currently stands.
+  const colPill = (action, st, lo, hi) =>
+    pill(st, st === 'on' ? hi : st === 'off' ? lo : 'Mixed',
+      post(action, { value: 'off' }, `<button aria-label="all ${esc(lo)}" title="Set the whole column to ${esc(lo)}"></button>`) +
+      post(action, { value: 'on' }, `<button aria-label="all ${esc(hi)}" title="Set the whole column to ${esc(hi)}"></button>`));
 
   const tabRows = httpTabs.map((x) => {
     let origin = ''; try { origin = new URL(x.url).origin; } catch {}
     const r = resolveAccess(x.url);
     const fav = x.favIconUrl
       ? `<img src="${esc(x.favIconUrl)}" style="width:15px;height:15px;border-radius:3px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'">` : '';
-    const cellFor = (c, labels, action) => {
+    const cellFor = (c, lo, hi, action) => {
       const d = r[c];
-      if (d.locked) return locked(c === 'storage' ? d.value === 'perm' : d.value, labels, d.rule);
-      if (c !== 'read' && !r.read.value) {
-        return `<span class="tgl lockedcell" title="Read is off for this site, so nothing else can apply"><span class="lbl l">Off</span>${sw(false, '', false)}<span class="lbl r"></span></span>`;
+      const on = c === 'storage' ? d.value === 'perm' : d.value;
+      if (d.locked) return pillBtn(on ? 'on' : 'off', on ? hi : lo, `Set by the rule ${d.rule} above — change it there`, true);
+      if (c !== 'read' && c !== 'storage' && !r.read.value) {
+        return pillBtn('off', 'Off', 'Read is off for this site, so nothing else can apply', true);
       }
-      return toggle(action, { origin }, c === 'storage' ? d.value === 'perm' : d.value, labels);
+      return post(action, { origin }, pillBtn(on ? 'on' : 'off', on ? hi : lo, 'Click to change'));
     };
-    const src = CAPCOLS.some(([c]) => r[c].locked) || r.storage.locked
-      ? ` · <span title="Some settings come from a rule above">rule</span>` : '';
+    const byRule = CAPCOLS.some(([c]) => r[c].locked) || r.storage.locked;
     return `<tr>
       <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
-        <div class="mut" style="font-size:11px">${esc(origin)}${src}</div></td>
-      ${CAPCOLS.map(([c]) => `<td class="tc">${cellFor(c, ['Off', 'On'], 'tabcap-' + c)}</td>`).join('')}
-      <td class="tc">${cellFor('storage', ['Tmp', 'Perm'], 'tabcap-storage')}</td></tr>`;
+        <div class="mut" style="font-size:11px">${esc(origin)}${byRule ? ' · set by a rule' : ''}</div></td>
+      ${CAPCOLS.map(([c]) => `<td class="tc">${cellFor(c, 'Off', 'On', 'tabcap-' + c)}</td>`).join('')}
+      <td class="tc">${cellFor('storage', 'Tmp', 'Perm', 'tabcap-storage')}</td></tr>`;
   }).join('') || `<tr><td colspan=${CAPCOLS.length + 2} class="mut">No http(s) tabs open.</td></tr>`;
 
-  const th = (label, hint, cap) =>
-    `<th class="tc" title="${esc(hint)}">${esc(label)}${httpTabs.length ? ' ' + triCell('allcap-' + cap, colState(cap), ['Off', 'On']) : ''}</th>`;
+  // --- where recordings are written -------------------------------------------
+  const roots = (ctx && ctx.monitor && ctx.monitor.MON_ROOTS) || { tmp: '', perm: '' };
+  const defaults = (ctx && ctx.monitor && ctx.monitor.MON_DEFAULTS) || { tmp: '', perm: '' };
+  const pathRow = (root, label, hint) => `<tr class="pathrow">
+    <td style="width:70px"><b>${esc(label)}</b></td>
+    <td>${post('setroot', { root },
+        `<input name=dir value="${esc(roots[root] || '')}" spellcheck=false><button class="btn">Save</button>`,
+        'display:flex;gap:8px;align-items:center;width:100%')}
+      <div class="mut" style="font-size:11px;margin-top:3px">${esc(hint)}${
+        roots[root] !== defaults[root] ? ` · default is <code>${esc(defaults[root])}</code>` : ''}</div></td></tr>`;
 
   const body = `${TGL_CSS}
+    ${err ? `<div class="card" style="border-color:var(--bad);color:var(--bad)">⚠ ${esc(err)}</div>` : ''}
+    <h2>Where recordings are written</h2>
+    <div class="card"><table><tbody>
+      ${pathRow('tmp', 'Tmp', 'Scratch space. macOS clears it periodically, so use it for captures you only need today.')}
+      ${pathRow('perm', 'Perm', 'Kept until you delete it. Point this at a bigger disk if you record a lot.')}
+    </tbody></table>
+    <div class="mut" style="font-size:12px;margin-top:6px">Absolute paths. Changing one affects NEW recordings only —
+      anything already captured stays where it was written. Leave a box empty to go back to the default.</div></div>
+
     <h2>What agents may do, and where</h2>
     <p class="mut">Read top to bottom: the first rule with an opinion decides, and the bottom line covers everything else.
       <b>Read is the master</b> — with read off, nothing else applies to that site.</p>
 
     <div class="card"><table>
       <thead><tr><th>Site</th>${CAPCOLS.map(([, l, hint]) => `<th class="tc" title="${esc(hint)}">${esc(l)}</th>`).join('')}
-        <th class="tc" title="Where recordings for this site are saved">Recordings</th><th></th></tr></thead>
+        <th class="tc" title="Where recordings for this site are saved">Storage</th><th></th></tr></thead>
       <tbody>${ruleRows}${defRow}</tbody></table>
       ${post('addrule', {}, `<input name=pattern placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site rule</button>`, 'margin-top:10px;display:block')}
       <div class="mut" style="font-size:12px;margin-top:6px">A rule set to <b>N/A</b> says nothing about that capability, so the next
@@ -546,11 +547,11 @@ async function tabsPage() {
     <h2>Open tabs</h2>
     <div class="card"><table>
       <thead><tr><th>Tab</th>
-        ${CAPCOLS.map(([c, l, hint]) => th(l, hint, c)).join('')}
-        <th class="tc" title="Where this tab's recording is saved">Recordings</th></tr></thead>
+        ${CAPCOLS.map(([c, l, hint]) => `<th class="tc" title="${esc(hint)}">${esc(l)}${httpTabs.length ? colPill('allcap-' + c, colState(c), 'Off', 'On') : ''}</th>`).join('')}
+        <th class="tc" title="Where this tab's recording is saved">Storage${httpTabs.length ? colPill('allcap-storage', colState('storage'), 'Tmp', 'Perm') : ''}</th></tr></thead>
       <tbody>${tabRows}</tbody></table>
-      <div class="mut" style="font-size:12px;margin-top:8px">These are one-off choices for a site that no rule above decided.
-        A greyed switch is set by a rule — hover it to see which. The switch beside a column heading sets that whole column
+      <div class="mut" style="font-size:12px;margin-top:8px">These are one-off choices for a site no rule above decided.
+        A dimmed pill is set by a rule — hover it to see which. The pill beside a column heading sets that whole column
         (click its left or right half) and skips anything a rule has locked.</div></div>`;
 
   return uiChrome('Tabs', body, '/tabs');
@@ -729,7 +730,7 @@ export async function uiRoutes(req, res, url) {
     redirect(res, '/modules/' + id); return true;
   }
 
-  if (req.method === 'GET' && p === '/tabs') { htmlRes(res, await tabsPage()); return true; }
+  if (req.method === 'GET' && p === '/tabs') { htmlRes(res, await tabsPage(url.searchParams.get('err') || '')); return true; }
   if (req.method === 'POST' && p === '/tabs') {
     const { form } = await readBody(req);
     const a = String(form.action || '');
@@ -755,6 +756,13 @@ export async function uiRoutes(req, res, url) {
     else if (a === 'defstorage') setDefaultCap('storage', tabAccess().default.storage === 'perm' ? 'tmp' : 'perm');
     // Per-tab, and per-column bulk. Both are no-ops on anything a rule has locked.
     else if (a.startsWith('tabcap-')) toggleTabCap(String(form.origin || ''), a.slice(7));
+    else if (a === 'setroot') {
+      const m = ctx && ctx.monitor;
+      const r = m && m.setRecordingRoot ? m.setRecordingRoot(String(form.root || ''), String(form.dir || '')) : { ok: false, error: 'unavailable' };
+      // A rejected path must SAY so. Silently redirecting leaves the old value in the box
+      // and no explanation, which reads as "the Save button does nothing".
+      if (!r.ok) { redirect(res, '/tabs?err=' + encodeURIComponent(r.error || 'could not set that folder')); return true; }
+    }
     else if (a.startsWith('allcap-')) {
       const cap = a.slice(7);
       const value = cap === 'storage' ? (form.value === 'on' ? 'perm' : 'tmp') : form.value === 'on';

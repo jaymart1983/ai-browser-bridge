@@ -26,10 +26,11 @@ export const state = {
   activeBrowser: null, // browserId that currently receives relayed commands
   autoUpdate: false, // opt-in: auto fast-forward the git clone from origin + restart
 
-  // Which tabs may be touched at all — the one access control in 2.0, replacing the
-  // rules engine. Deny-by-default: a fresh install grants nothing.
-  tabAccess: { default: 'off', origins: {} }, // default for undecided sites + per-site overrides
-  recording: { default: 'tmp', byOrigin: {} }, // where a tab's recording is saved
+  // What may be done and where: an ordered rule list ending in a default line, each row
+  // granting read/control/record/annotate independently. Deny-by-default — the bottom
+  // line starts all-off and a fresh install grants nothing. See tabaccess.mjs.
+  tabAccess: { rules: [], default: { read: false, control: false, record: false, annotate: false, storage: 'tmp' }, tabs: {} },
+  recordingRoots: {},  // { tmp?, perm? } — override where each recording root points
 
   // Modules — scheduled automations, not an agent tool surface.
   modulesEnabled: [],  // [moduleId] — which modules are active
@@ -48,10 +49,9 @@ export function load() {
   try {
     if (existsSync(FILE)) {
       const d = JSON.parse(readFileSync(FILE, 'utf8'));
-      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'browsers', 'moduleOwners', 'moduleRuns', 'moduleStore']) if (d[k]) state[k] = d[k];
+      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'browsers', 'moduleOwners', 'moduleRuns', 'moduleStore', 'recordingRoots']) if (d[k]) state[k] = d[k];
       for (const k of ['modulesEnabled', 'modulesSeen']) if (Array.isArray(d[k])) state[k] = d[k];
       if (d.tabAccess && typeof d.tabAccess === 'object') state.tabAccess = d.tabAccess;
-      if (d.recording && typeof d.recording === 'object') state.recording = d.recording;
       if ('pairing' in d) state.pairing = d.pairing;
       if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;
       if ('autoUpdate' in d) state.autoUpdate = !!d.autoUpdate;

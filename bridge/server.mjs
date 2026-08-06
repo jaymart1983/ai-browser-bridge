@@ -835,10 +835,39 @@ setInterval(() => {
 // Two storage classes:
 //   tmp  — OS temp dir; cleared on reboot (scratch recordings).
 //   perm — <project>/browser-bridge/recordings; survives reboot.
-const MON_ROOTS = {
+// Where recordings live. The defaults are the historical ones; the Tabs page can point
+// either root somewhere else (a bigger disk, a synced folder), which is stored in
+// state.recordingRoots. Read through a function rather than frozen at boot so a change
+// takes effect on the next recording instead of needing a restart.
+const MON_DEFAULTS = {
   tmp: join(tmpdir(), 'browser-bridge'),
   perm: process.env.BRIDGE_PERM_DIR || join(dirname(fileURLToPath(import.meta.url)), '..', 'recordings'),
 };
+const MON_ROOTS = {
+  get tmp() { return (state.recordingRoots && state.recordingRoots.tmp) || MON_DEFAULTS.tmp; },
+  get perm() { return (state.recordingRoots && state.recordingRoots.perm) || MON_DEFAULTS.perm; },
+};
+
+// Change where one root points. Refuses anything that isn't an absolute path, and never
+// moves existing recordings — sessions already on disk stay where they were written, so
+// a mistyped path cannot strand or delete data.
+function setRecordingRoot(root, dir) {
+  if (root !== 'tmp' && root !== 'perm') return { ok: false, error: 'root must be tmp or perm' };
+  const d = String(dir || '').trim();
+  if (!d) { // empty = back to the default
+    if (state.recordingRoots) delete state.recordingRoots[root];
+    save();
+    return { ok: true, roots: { tmp: MON_ROOTS.tmp, perm: MON_ROOTS.perm } };
+  }
+  if (!d.startsWith('/')) return { ok: false, error: 'use an absolute path' };
+  try { mkdirSync(d, { recursive: true }); } catch (e) { return { ok: false, error: 'cannot create that folder: ' + (e && e.message) }; }
+  try { writeFileSync(join(d, '.bb-write-test'), ''); rmSync(join(d, '.bb-write-test'), { force: true }); }
+  catch { return { ok: false, error: 'that folder is not writable' }; }
+  state.recordingRoots = state.recordingRoots || {};
+  state.recordingRoots[root] = d;
+  save();
+  return { ok: true, roots: { tmp: MON_ROOTS.tmp, perm: MON_ROOTS.perm } };
+}
 const ROOT_KEYS = ['tmp', 'perm'];
 const shotCounters = new Map(); // sessionKey -> int
 const sessionMeta = new Map(); // sessionKey -> {startedAt, count, ...}
@@ -1108,7 +1137,7 @@ function serveDashboard(res) {
 configureTabAccess({ relayCommand });
 const moduleCtx = {
   relayCommand, state, save, resolveTabUrl,
-  monitor: { listSessions, readEvents, readShot, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS },
+  monitor: { listSessions, readEvents, readShot, moveSession, deleteSession, clearRoot, usageByRoot, MON_ROOTS, MON_DEFAULTS, setRecordingRoot },
   // Overlay capability: the user's in-page marks, awaiting collection by an agent.
   overlay: { marks: listOverlayMarks },
 };
