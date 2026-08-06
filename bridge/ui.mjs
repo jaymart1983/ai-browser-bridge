@@ -361,10 +361,29 @@ async function tabsPage() {
   const post = (action, extra, inner, style = '') =>
     `<form method=POST action="/tabs" style="display:inline-block;margin:0;${style}"><input type=hidden name=action value="${action}">` +
     Object.entries(extra).map(([k, v]) => `<input type=hidden name="${k}" value="${esc(v)}">`).join('') + inner + '</form>';
-  const toggle = (action, extra, on, cls = '') =>
-    post(action, extra, `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} onchange="this.form.submit()"><span class="slider"></span></label>`, 'vertical-align:middle');
-  const dead = (on) => `<label class="switch"><input type=checkbox ${on ? 'checked' : ''} disabled><span class="slider"></span></label>`;
-  const storLbl = (perm) => `<span class="mut" style="font-size:11px;margin-left:6px">${perm ? 'Perm' : 'Tmp'}</span>`;
+  // A toggle plus its label, laid out as [left slot][switch][right slot]. BOTH slots are
+  // always rendered at the same fixed width and only one carries text, so the cell is the
+  // same size in either state — flipping a switch must not resize the column under the
+  // pointer. The label sits on the side the knob is on, so the word and the knob agree.
+  const sw = (on, cls, live) =>
+    `<label class="switch ${cls}"><input type=checkbox ${on ? 'checked' : ''} ${live ? 'onchange="this.form.submit()"' : 'disabled'}><span class="slider"></span></label>`;
+  const cell = (on, labels, inner) =>
+    `<span class="tgl"><span class="lbl l">${on ? '' : esc(labels[0])}</span>${inner}<span class="lbl r">${on ? esc(labels[1]) : ''}</span></span>`;
+  const toggle = (action, extra, on, labels, cls = '') =>
+    post(action, extra, cell(on, labels, sw(on, cls, true)), 'vertical-align:middle');
+  const dead = (on, labels) => cell(on, labels, sw(on, '', false));
+
+  const TGL_CSS = `<style>
+    .tgl{display:inline-flex;align-items:center;gap:6px}
+    .tgl .lbl{font-size:11px;color:var(--mut);width:36px;display:inline-block}
+    .tgl .lbl.l{text-align:right}
+    .tgl .lbl.r{text-align:left}
+    td.tc,th.tc{text-align:center;width:1%;white-space:nowrap}
+  </style>`;
+
+  // Left label = off state, right label = on state, matching where the knob sits.
+  const ON_OFF = ['Off', 'On'];
+  const TMP_PERM = ['Tmp', 'Perm'];
 
   const MODES = [
     ['all', 'All tabs', 'Everything you have open, and anything you open later.'],
@@ -380,7 +399,7 @@ async function tabsPage() {
   // otherwise closing a tab would look like the permission had been revoked.
   const siteRows = t.origins.length ? t.origins.map((o) => `<tr>
       <td><code>${esc(o)}</code></td>
-      <td>${toggle('toggle', { origin: o }, true)}</td>
+      <td class="tc">${toggle('toggle', { origin: o }, true, ON_OFF)}</td>
       <td class="mut" style="font-size:12px">${openTabs.some((x) => matchPattern(o, x.url || '')) ? 'open now' : '—'}</td></tr>`).join('')
     : '<tr><td colspan=3 class="mut">No sites enabled. Add one below, or from an open tab.</td></tr>';
 
@@ -394,20 +413,20 @@ async function tabsPage() {
     return `<tr>
       <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fav}${esc(x.title || origin)}
         <div class="mut" style="font-size:11px">${esc(origin)}</div></td>
-      <td>${t.mode === 'all' ? dead(true) + '<span class="mut" style="font-size:11px;margin-left:6px">via All</span>'
-           : t.mode === 'none' ? dead(false) + '<span class="mut" style="font-size:11px;margin-left:6px">off</span>'
-           : toggle('toggle', { origin }, on)}</td>
-      <td>${toggle('storage', { origin }, perm)}${storLbl(perm)}</td>
-      <td>${toggle(isRec ? 'stoprec' : 'record', { tabId: x.tabId }, isRec, 'rec')}</td></tr>`;
+      <td class="tc">${t.mode === 'selected'
+        ? toggle('toggle', { origin }, on, ON_OFF)
+        : dead(t.mode === 'all', ON_OFF)}</td>
+      <td class="tc">${toggle('storage', { origin }, perm, TMP_PERM)}</td>
+      <td class="tc">${toggle(isRec ? 'stoprec' : 'record', { tabId: x.tabId }, isRec, ON_OFF, 'rec')}</td></tr>`;
   }).join('') || '<tr><td colspan=4 class="mut">No http(s) tabs open.</td></tr>';
 
-  const body = `
+  const body = `${TGL_CSS}
     <h2>Which tabs can be used</h2>
     <p class="mut">Agents and scheduled modules can only act on tabs allowed here. A fresh install is <b>Off</b>.</p>
     <div class="card"><div class="row" style="gap:8px;flex-wrap:wrap">${modeCards}</div></div>
 
     <h2>Enabled sites</h2>
-    <div class="card"><table><thead><tr><th>Pattern</th><th>Enabled</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
+    <div class="card"><table><thead><tr><th>Pattern</th><th class="tc">Enabled</th><th></th></tr></thead><tbody>${siteRows}</tbody></table>
       ${post('add', {}, `<input name=origin placeholder="*.example.com" style="min-width:240px"> <button class="btn">Add site</button>`, 'margin-top:10px;display:block')}
       <div class="mut" style="font-size:12px;margin-top:6px">Matches a host (<code>example.com</code>), a host wildcard
         (<code>*.example.com</code>), an origin (<code>https://example.com</code>) or a URL prefix
@@ -415,10 +434,12 @@ async function tabsPage() {
 
     <h2>Open tabs</h2>
     <div class="card"><table>
-      <thead><tr><th>Tab</th><th>Access</th><th>Recording saved to</th><th>Record</th></tr></thead>
+      <thead><tr><th>Tab</th><th class="tc">Access</th><th class="tc">Recording saved to</th><th class="tc">Record</th></tr></thead>
       <tbody>${tabRows}</tbody></table>
-      <div class="mut" style="font-size:12px;margin-top:8px">Recordings go to a temporary folder by default
-        (<b>Tmp</b>, cleared by macOS) or are kept under <code>browser-bridge/recordings</code> (<b>Perm</b>).
+      <div class="mut" style="font-size:12px;margin-top:8px">${t.mode === 'selected' ? ''
+        : `Access is set to <b>${t.mode === 'all' ? 'All tabs' : 'Off'}</b> above, so per-tab switches are disabled. Choose <b>Selected sites</b> to control tabs individually.<br>`}Recordings
+        go to a temporary folder by default (<b>Tmp</b>, cleared by macOS) or are kept under
+        <code>browser-bridge/recordings</code> (<b>Perm</b>).
         Default for new tabs: ${post('default', { value: rec.default === 'perm' ? 'tmp' : 'perm' },
           `<button class="btn">${rec.default === 'perm' ? 'Perm' : 'Tmp'}</button>`)}</div></div>`;
 
