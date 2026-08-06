@@ -1,13 +1,18 @@
 // popup.js — thin extension popup. The browser's only job is to PAIR with the
-// local bridge and execute its signed commands; all configuration (modules,
-// rules, tabs, recording, storage) lives in the bridge web UI. The popup shows
-// pairing status, authorized agents, and links into the bridge.
+// local bridge and execute its signed commands; all configuration (tabs, modules,
+// recording, storage) and linking itself live in the bridge web UI. This popup is a
+// status readout: one line for the bridge, the agents awaiting approval, and a gear
+// into settings.
 
 const $ = (id) => document.getElementById(id);
 const send = (action, extra = {}) => chrome.runtime.sendMessage({ type: 'POPUP', action, ...extra });
 
 let dashboardUrl = 'http://127.0.0.1:8787/';
 let extPaired = false;
+// What the BRIDGE says about pairing (null until /bridge/status answers once). Kept
+// separate from the extension's own view so a disagreement between the two is visible
+// rather than averaged away.
+let bridgeSaysPaired = null;
 let myBrowserId = null;
 let myBrowserName = 'This browser';
 
@@ -29,69 +34,77 @@ function changed(key, value) {
   return true;
 }
 
+// Write only on a real change. `el.textContent = same string` still tears down the text
+// node and builds a new one, and `el.className = same value` still dirties the attribute
+// — so the "nothing changed" poll was producing a dozen DOM mutations a tick, which is
+// the flicker. These make an unchanged poll a no-op.
+const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
+const setCls = (el, v) => { if (el && el.className !== v) el.className = v; };
+const setTitle = (el, v) => { if (el && el.getAttribute('title') !== v) el.setAttribute('title', v); };
+// classList.add/remove notify MutationObservers even when the token is already in the
+// wanted state. Harmless (the class value is unchanged, so nothing repaints) but it
+// makes "is this popup churning?" impossible to answer by measurement — so check first.
+const setHidden = (el, hide) => {
+  if (!el) return;
+  if (el.classList.contains('hidden') !== !!hide) el.classList.toggle('hidden', !!hide);
+};
+
 async function refresh() {
   let s;
   try { s = await send('getState'); } catch { $('wsText').textContent = 'Service worker unavailable'; return; }
   if (!s) return;
 
-  $('runDot').className = 'dot ok';
+  setCls($('runDot'), 'dot ok');
 
   // EMBEDDED MODE: the host application provides the interface, so this popup is a
   // status readout and nothing else. Branch BEFORE touching any standalone element —
   // renderEmbedded owns everything it shows (including the version label).
   if (s.embedded) return renderEmbedded(s);
 
-  $('version').textContent = 'extension v' + (s.version || '');
-  $('version').title = 'Extension version. The bridge shows its own version in the control panel.';
-  $('wsDot').className = 'dot ' + (s.wsConnected ? 'ok' : 'bad');
-  $('wsText').textContent = s.wsConnected ? 'Connected to bridge (running)' : 'Bridge not running — start it';
+  setText($('version'), 'extension v' + (s.version || ''));
+  setTitle($('version'), 'Extension version. The bridge shows its own version in the control panel.');
 
   dashboardUrl = dashUrlFrom(s.bridgeUrl);
-  // Embedded mode has no control plane (it 404s by design — the host app owns the
-  // UI), so don't offer a button that always lands on "site can't be reached".
-  $('openDash').classList.toggle('hidden', !!s.embedded);
-  $('openDash').disabled = !s.wsConnected || !!s.embedded;
-  $('openDash').title = s.embedded ? 'The host application provides the interface' : (s.wsConnected ? dashboardUrl : 'Bridge not running');
-
   const paired = s.paired === true;
+
+  // Three states, and only three. Everything else — where the bridge is, when it was
+  // linked, which browsers are attached — lives on the settings page; repeating it here
+  // made a status readout that needed reading. The gear is hidden in the red state
+  // because there is no settings page to open when nothing is there.
+  const state = !s.wsConnected ? 'down' : (paired && bridgeSaysPaired !== false) ? 'ok' : 'unlinked';
+  const TEXT = {
+    ok: 'Connected to Bridge',
+    unlinked: 'Go to Settings to link bridge',
+    down: 'No bridge detected',
+  };
+  setCls($('wsDot'), 'dot ' + (state === 'ok' ? 'ok' : state === 'unlinked' ? 'link' : 'bad'));
+  setCls($('wsText'), 'grow' + (state === 'unlinked' ? ' link' : state === 'down' ? ' bad' : ''));
+  setText($('wsText'), s.pairError ? '⚠ ' + s.pairError : TEXT[state]);
+  setTitle($('wsText'), state === 'ok' ? `Paired with the bridge at ${hostOf(dashboardUrl)} and connected.`
+    : state === 'unlinked' ? 'The bridge is running but this browser is not paired with it yet. Open settings to link.'
+      : 'Nothing is answering on the bridge address. Start Browser Bridge.');
+
+  // Gear only when there is somewhere to go.
+  setHidden($('openDash'), state === 'down');
+  setTitle($('openDash'), 'Bridge settings');
   extPaired = paired;
   myBrowserId = s.browserId || null;
   myBrowserName = s.browserName || 'This browser';
-  let host = '127.0.0.1:8787';
-  try { host = new URL(dashboardUrl).host; } catch {}
-  const isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
-  const place = isLoopback ? 'this device' : host;
-  // "Linked" is about a stored pairing key; "connected" is about a live socket. They
-  // are independent (you can be linked with the bridge stopped), and conflating them
-  // hides exactly the failure where the socket never attached — so say both.
-  const linkWord = s.embedded ? 'Managed' : 'Linked';
-  $('bridgeMeta').textContent = s.pairError ? '⚠ ' + s.pairError
-    : !s.wsConnected ? (paired ? `○ ${linkWord}, NOT connected — bridge not reachable at ${host}` : '○ Local bridge — not running')
-    : paired ? `🔒 ${linkWord} · connected · ${host}`
-      : `🖥 Connected · ${host} — not linked yet`;
-  $('bridgeMeta').style.color = s.pairError ? 'var(--bad)' : (paired && !s.wsConnected ? 'var(--warn)' : '');
-  $('bridgeMeta').title = s.embedded
-    ? `Managed by the host application. Socket target: ${host}. "Managed" means keys are provisioned by the host; "connected" means the WebSocket is open right now.`
-    : `A helper on your own computer at ${host}. Traffic stays on this device (loopback). "Linked" means a pairing key is stored; "connected" means the WebSocket is open right now.`;
-
-  $('agentsSection').classList.toggle('hidden', !s.wsConnected);
-  $('navSection').classList.toggle('hidden', !s.wsConnected);
-  if (s.embedded) {
-    // Embedded mode: the host application owns the trust relationship — no
-    // linking/unlinking from here.
-    $('linkBtn').textContent = 'Managed';
-    $('linkBtn').className = '';
-    $('linkBtn').disabled = true;
-    $('linkBtn').title = 'This bridge is managed by its host application.';
-  } else {
-    $('linkBtn').textContent = paired ? 'Unlink' : 'Link';
-    $('linkBtn').className = paired ? '' : 'primary';
-    $('linkBtn').disabled = !s.wsConnected;
-    $('linkBtn').title = !s.wsConnected ? 'Start the bridge first' : paired ? 'Unpair this browser' : 'Pair this browser with this local bridge';
+  // ONE owner per section. This used to show navSection here and then renderNav would
+  // hide it again in the same tick when there were no modules — the section appeared
+  // and vanished every poll, which is the flicker. Whoever has the data decides;
+  // refresh only handles the disconnected case, where those renderers don't run at all.
+  setHidden($('agentsSection'), !s.wsConnected);
+  if (!s.wsConnected) {
+    for (const id of ['navSection', 'tabActionsSection', 'updateSection', 'browsersSection']) {
+      setHidden($(id), true);
+    }
+    return;
   }
-
-  if (s.wsConnected) { renderTabActions(); renderAgents(); renderNav(); renderUpdate(); }
+  renderTabActions(); renderAgents(); renderNav(); renderUpdate();
 }
+
+const hostOf = (u) => { try { return new URL(u).host; } catch { return '127.0.0.1:8787'; } };
 
 // Embedded readout: is the bridge reachable, where is it, and is the host's agent
 // actually using it. No linking, no agent approvals, no control-panel link, no module
@@ -101,9 +114,9 @@ async function renderEmbedded(s) {
   // produced a popup that said "Connected to bridge (running)" directly above
   // "Bridge not reachable". One section owns this readout.
   for (const id of ['statusSection', 'tabActionsSection', 'updateSection', 'browsersSection', 'agentsSection', 'navSection']) {
-    const el = $(id); if (el) el.classList.add('hidden');
+    setHidden($(id), true);
   }
-  $('embeddedSection').classList.remove('hidden');
+  setHidden($('embeddedSection'), false);
 
   // The socket target is known from the service worker even when the bridge is down,
   // so the address is ALWAYS accurate — /health only enriches it (version, agent).
@@ -118,12 +131,12 @@ async function renderEmbedded(s) {
   const stale = !!(raw && raw.ok === false && /unknown popup action/i.test(String(raw.error || '')));
   if (st) where = `${st.host}:${st.port}`;
 
-  $('embBridgeDot').className = 'dot ' + (st ? 'ok' : 'bad');
-  $('embBridgeText').textContent = st ? 'Bridge running'
-    : stale ? 'Extension out of date — reload it' : 'Bridge not reachable';
-  $('embBridgeText').title = st ? `The bridge at ${where} answered a status request.`
+  setCls($('embBridgeDot'), 'dot ' + (st ? 'ok' : 'bad'));
+  setText($('embBridgeText'), st ? 'Bridge running'
+    : stale ? 'Extension out of date — reload it' : 'Bridge not reachable');
+  setTitle($('embBridgeText'), st ? `The bridge at ${where} answered a status request.`
     : stale ? 'This extension build is older than the popup it is serving. Reload the extension.'
-      : `No status answer from ${where}. The host application may not be running.`;
+      : `No status answer from ${where}. The host application may not be running.`);
 
   // "the browser is attached" and "the agent is using it" fail independently — saying
   // only one hides the other.
@@ -131,20 +144,20 @@ async function renderEmbedded(s) {
   const agentName = (agent && agent.name) || 'Agent';
   const browserOk = st ? !!st.browserConnected : !!s.wsConnected;
   const agentOk = !!(agent && agent.active);
-  $('embAgentDot').className = 'dot ' + (agentOk ? 'ok' : (st ? 'warn' : 'bad'));
-  $('embAgentText').textContent = !st ? `${agentName} — unknown`
+  setCls($('embAgentDot'), 'dot ' + (agentOk ? 'ok' : (st ? 'warn' : 'bad')));
+  setText($('embAgentText'), !st ? `${agentName} — unknown`
     : agentOk ? `${agentName} connected`
     : agent.lastSeen ? `${agentName} idle · last call ${relTime(agent.lastSeen)}`
-      : `${agentName} — no calls yet`;
-  $('embAgentText').title = 'Whether the host application has made an authorized call through the bridge recently.';
+      : `${agentName} — no calls yet`);
+  setTitle($('embAgentText'), 'Whether the host application has made an authorized call through the bridge recently.');
 
-  $('embMeta').textContent = `${where} · browser ${browserOk ? 'attached' : 'not attached'}`;
-  $('embMeta').title = `The bridge listens on ${where} (loopback only). "browser attached" means this extension's socket is open.`;
+  setText($('embMeta'), `${where} · browser ${browserOk ? 'attached' : 'not attached'}`);
+  setTitle($('embMeta'), `The bridge listens on ${where} (loopback only). "browser attached" means this extension's socket is open.`);
 
   // Report the BRIDGE version here. The extension is bundled by the host application,
   // so its manifest version is the HOST's version number — showing that under a
   // "Browser Bridge" heading just misidentifies which component you're looking at.
-  $('version').textContent = st && st.version ? 'bridge v' + st.version : '';
+  setText($('version'), st && st.version ? 'bridge v' + st.version : '');
   $('version').title = 'Bridge version. This extension is bundled by the host application, so its own version tracks that app.';
 }
 
@@ -156,15 +169,15 @@ async function renderTabActions() {
   if (!sec) return;
   let tab;
   try { [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }); } catch { tab = null; }
-  if (!tab || !/^https?:/i.test(tab.url || '')) { sec.classList.add('hidden'); return; }
+  if (!tab || !/^https?:/i.test(tab.url || '')) { setHidden(sec, true); return; }
   let actions = [];
   try { actions = ((await (await fetch(bridgeBase() + '/bridge/tab-actions?url=' + encodeURIComponent(tab.url) + '&tabId=' + tab.id, { cache: 'no-store' })).json()).actions) || []; }
-  catch { sec.classList.add('hidden'); return; }
-  if (!actions.length) { sec.classList.add('hidden'); return; }
+  catch { setHidden(sec, true); return; }
+  if (!actions.length) { setHidden(sec, true); return; }
   let host = tab.url; try { host = new URL(tab.url).host; } catch {}
-  sec.classList.remove('hidden');
+  setHidden(sec, false);
   if (!changed('tabActions', { host, actions })) return; // nothing to repaint
-  $('tabActionsLabel').textContent = 'This tab · ' + host;
+  setText($('tabActionsLabel'), 'This tab · ' + host);
   const box = $('tabActionsList');
   box.innerHTML = '';
   for (const a of actions) {
@@ -183,7 +196,7 @@ async function renderTabActions() {
     row.appendChild(b);
     box.appendChild(row);
   }
-  sec.classList.remove('hidden');
+  setHidden(sec, false);
 }
 
 // Show a prompt when a newer release is available. Works for both install channels:
@@ -193,12 +206,17 @@ async function renderUpdate() {
   const sec = $('updateSection');
   if (!sec) return;
   let d;
-  try { d = await (await fetch(bridgeBase() + '/bridge/update', { cache: 'no-store' })).json(); } catch { sec.classList.add('hidden'); return; }
+  try { d = await (await fetch(bridgeBase() + '/bridge/update', { cache: 'no-store' })).json(); } catch { setHidden(sec, true); return; }
   const can = d && (d.channel === 'zip' ? d.updateAvailable : d.canFastForward);
-  if (!can) { sec.classList.add('hidden'); return; }
+  if (!can) { setHidden(sec, true); return; }
   const label = d.channel === 'zip' ? ('v' + (d.latest || '')) : (d.tag || 'latest');
+  setHidden(sec, false);
+  // Guarded like every other section: rewriting innerHTML on each 2.5s poll rebuilt
+  // these nodes constantly, which is the flash. It also re-enabled the button mid-update,
+  // so "Updating & restarting…" could flip back to a live button while the bridge
+  // was still restarting.
+  if (!changed('update', { label, channel: d.channel })) return;
   $('updateText').innerHTML = 'Update available → <b>' + label + '</b>';
-  sec.classList.remove('hidden');
   const btn = $('updateBtn');
   btn.disabled = false;
   btn.onclick = async () => {
@@ -216,21 +234,17 @@ async function renderAgents() {
   let data;
   try { data = await (await fetch(bridgeBase() + '/bridge/status', { cache: 'no-store' })).json(); } catch { return; }
   const bridgePaired = !!(data.pairing && data.pairing.paired);
-  if (extPaired !== bridgePaired) {
-    $('bridgeMeta').textContent = '⚠ Bridge changed — re-link needed';
-  } else if (bridgePaired && data.pairing && data.pairing.created) {
-    const d = new Date(data.pairing.created);
-    const when = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    const base = $('bridgeMeta').textContent.replace(/\s·\slinked .*$/, '');
-    $('bridgeMeta').textContent = base + ' · linked ' + when;
-    $('bridgeMeta').title = 'Linked ' + d.toLocaleString();
-  }
+  // The extension and the bridge can disagree — a bridge reinstalled or its state file
+  // replaced leaves the extension holding a key nothing accepts. That reads as "linked"
+  // here while every command fails, so it must surface. It is a LINK problem, so the
+  // status line reports it as one on the next tick rather than as a separate note.
+  bridgeSaysPaired = bridgePaired;
   // Linked-browsers list — show ALL of them; the browser viewing this popup is
   // marked "(this browser)". Names come from the bridge, so renames appear here.
   const browsers = data.browsers || [];
   const bSec = $('browsersSection'), bList = $('browserList');
   if (bSec && bList && changed('browsers', { paired: bridgePaired, browsers, me: myBrowserId })) {
-    bSec.classList.toggle('hidden', !(bridgePaired && browsers.length));
+    setHidden(bSec, !(bridgePaired && browsers.length));
     bList.innerHTML = '';
     for (const b of browsers) {
       const mine = b.id === myBrowserId;
@@ -345,7 +359,7 @@ async function renderNav() {
   let data;
   try { data = await (await fetch(bridgeBase() + '/bridge/nav', { cache: 'no-store' })).json(); } catch { return; }
   const mods = data.modules || [];
-  $('navSection').classList.toggle('hidden', mods.length === 0);
+  setHidden($('navSection'), mods.length === 0);
   if (!changed('nav', mods)) return;
   const box = $('navLinks');
   box.innerHTML = '';
@@ -359,18 +373,8 @@ async function renderNav() {
 }
 
 // ---- events ---- (per-browser "Use" buttons are wired in renderAgents)
-$('openDash').addEventListener('click', () => { if (!$('openDash').disabled) chrome.tabs.create({ url: bridgeBase() + '/config' }); });
-$('linkBtn').addEventListener('click', async () => {
-  const s = await send('getState');
-  if (s && s.paired) {
-    if (!confirm('Unlink this browser from the bridge? Agents lose access until you re-link.')) return;
-    await send('unpair');
-    try { await fetch(bridgeBase() + '/bridge/unpair', { method: 'POST' }); } catch {}
-  } else {
-    await send('pair');
-  }
-  setTimeout(refresh, 400);
-});
+// Linking and unlinking both live on the settings page now — the popup is a readout.
+$('openDash').addEventListener('click', () => chrome.tabs.create({ url: bridgeBase() + '/config' }));
 
 refresh();
 setInterval(refresh, 2500);

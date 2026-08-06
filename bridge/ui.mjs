@@ -155,9 +155,38 @@ function configPage() {
   const anyRows = pendRows + agentRows.replace('<tr><td colspan=3 class="mut">No authorized agents.</td></tr>', '') + staleRows;
   return uiChrome('Config', `
     <h2>Bridge</h2>
-    <div class="card">Pairing: <span class="tag ${pair.paired ? 'on' : 'off'}">${pair.paired ? 'linked' : 'not linked'}</span>
-      ${pair.paired && pair.created ? `<span class="mut" style="font-size:12px;margin-left:8px">linked ${esc(new Date(pair.created).toLocaleString())}</span>` : ''}
-      <span class="mut" style="font-size:12px;margin-left:8px">Loopback 127.0.0.1 — nothing leaves this device.</span></div>
+    <div class="card"><div class="row">
+      <span>Pairing: <span class="tag ${pair.paired ? 'on' : 'off'}">${pair.paired ? 'linked' : 'not linked'}</span>
+      ${pair.paired && pair.created ? `<span class="mut" style="font-size:12px;margin-left:8px">linked ${esc(new Date(pair.created).toLocaleString())}</span>` : ''}</span>
+      <span class="grow"></span>
+      <button id="linkBtn" class="primary hidden">Link this browser</button>
+    </div>
+    <div class="mut" style="font-size:12px;margin-top:6px" id="linkNote">Loopback 127.0.0.1 — nothing leaves this device.</div></div>
+    <script>
+    (function(){
+      // Linking has to START in the extension (the pairing key is generated there and
+      // never leaves it), so this button asks the extension rather than doing it here.
+      // The button only appears once the extension has announced itself — otherwise it
+      // would be a control that silently does nothing.
+      var btn=document.getElementById('linkBtn'), note=document.getElementById('linkNote');
+      var paired=${pair.paired ? 'true' : 'false'}, present=false;
+      window.addEventListener('message',function(ev){
+        if(ev.source!==window||ev.origin!==location.origin)return;
+        var m=ev.data; if(!m||m.source!=='bb-ext')return;
+        if(m.type==='present'){ present=true; if(!paired) btn.classList.remove('hidden'); }
+        if(m.type==='link-result'){
+          btn.disabled=false;
+          if(m.result&&m.result.ok===false){ note.textContent='⚠ '+(m.result.error||'Linking failed'); }
+          else { setTimeout(function(){location.reload();},600); }
+        }
+      });
+      btn.onclick=function(){ btn.disabled=true; note.textContent='Linking…';
+        window.postMessage({source:'bb-page',type:'link'},location.origin); };
+      window.postMessage({source:'bb-page',type:'ping'},location.origin);
+      setTimeout(function(){ if(!present&&!paired){
+        note.textContent='Install the Browser Bridge extension in this browser, then reload this page to link it.'; } },1200);
+    })();
+    </script>
     <h2>Linked browsers <span class="mut" style="font-size:12px;font-weight:400">agent traffic routes to the active one — switch it here or from any extension</span></h2>
     <div class="card"><div id="browsersBox" class="mut">Loading…</div></div>
     <script>

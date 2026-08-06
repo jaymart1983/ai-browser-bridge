@@ -29,6 +29,17 @@
     if (!m || m.source !== 'bb-page') return;
 
     if (m.type === 'ping') { announce(); return; }
+
+    // Start pairing from the settings page. The key is still generated in the service
+    // worker and never leaves it; the page only asks.
+    if (m.type === 'link') {
+      let res;
+      try { res = await chrome.runtime.sendMessage({ type: 'PAGE_LINK' }); }
+      catch (e) { res = { ok: false, error: 'The ' + TAG + ' extension did not respond. Reload it and try again.' }; }
+      window.postMessage({ source: 'bb-ext', type: 'link-result', result: res || { ok: false } }, location.origin);
+      return;
+    }
+
     if (m.type !== 'decision') return;
 
     let res;

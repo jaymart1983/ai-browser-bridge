@@ -33,9 +33,13 @@
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   input[type=text]{background:var(--inp);color:var(--fg);border:1px solid var(--line);
     border-radius:7px;padding:6px 8px;font-size:12px;width:100%}
-  button.gbtn{width:30px;height:30px;padding:0;font-size:17px;line-height:1;flex:none;
+  button.gbtn{width:30px;height:30px;padding:0;font-size:15px;line-height:1;flex:none;
     display:flex;align-items:center;justify-content:center}
-  button.gbtn.arrow{color:var(--accent)}
+  button.gbtn.gear{color:var(--mut)}
+  button.gbtn.gear:hover{color:var(--fg)}
+  .dot.link{background:var(--accent)}
+  #wsText.link{color:var(--accent)}
+  #wsText.bad{color:var(--bad)}
   .agent{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
   .agent .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .agent .pend{color:var(--warn)}
@@ -58,11 +62,7 @@
   <div class="section" id="statusSection">
     <div class="row"><span id="wsDot" class="dot warn"></span>
       <span id="wsText" class="grow">Bridge…</span>
-      <button id="openDash" class="gbtn arrow" title="Open the bridge" disabled>↗</button></div>
-    <div class="row" style="margin-top:6px">
-      <span id="bridgeMeta" class="grow muted" style="font-size:11px">Local bridge</span>
-      <button id="linkBtn" title="Pair this browser with the bridge">Link</button>
-    </div>
+      <button id="openDash" class="gbtn gear hidden" title="Bridge settings" aria-label="Bridge settings">⚙</button></div>
   </div>
 
   <!-- EMBEDDED MODE: the host application owns the interface, so the popup is a

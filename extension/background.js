@@ -547,6 +547,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async
   }
 
+  // Linking, relayed from the bridge's control panel. Pairing has to start in the
+  // extension — the key is generated here and never leaves — but the popup is a status
+  // readout now, so the button that starts it lives on the settings page. Same origin
+  // check as PAGE_DECISION: only the CONFIGURED bridge may ask, and sender.origin
+  // cannot be forged by a page, so another local server can't pair itself in.
+  if (msg.type === 'PAGE_LINK') {
+    (async () => {
+      try {
+        const bridgeHttpOrigin = new URL((await effectiveBridgeUrl()).replace(/^ws/, 'http')).origin;
+        if (!sender || sender.origin !== bridgeHttpOrigin) {
+          return sendResponse({ ok: false, error: 'Only the bridge control panel may link from a page.' });
+        }
+        await ensureOffscreen();
+        sendResponse(await startPairing());
+      } catch (e) {
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true; // async
+  }
+
   // Popup <-> SW control messages.
   if (msg.type === 'POPUP') {
     handlePopup(msg)
