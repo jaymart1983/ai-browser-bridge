@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Bridge",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Pairs your browser with a local bridge so AI/MCP agents can drive it on sites you choose. Loopback only - nothing leaves your device.",
   "permissions": [
     "tabs",

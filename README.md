@@ -45,8 +45,8 @@ and `module_template` over MCP give an agent the exact contract. The first
 install of a module id needs your approval in the extension popup; after that
 the owning agent can keep it up to date on its own.
 
-The project ships one example, Deep Research, which opens your research sites,
-waits for you to sign in, and records them for later review.
+No modules ship with the bridge — it starts empty, and stays that way until you
+add one. Ask a connected agent for `module_template` to see the full shape.
 
 ## Requirements
 

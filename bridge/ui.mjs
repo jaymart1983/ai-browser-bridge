@@ -527,7 +527,7 @@ function modulesPage() {
       <form method=POST action="/modules/toggle"><input type=hidden name=id value="${esc(m.id)}"><input type=hidden name=enabled value="${m.enabled ? '0' : '1'}">
         <button class="${m.enabled ? '' : 'primary'}">${m.enabled ? 'Disable' : 'Enable'}</button></form>
       ${m.enabled ? `<a href="/modules/${esc(m.id)}"><button>${(() => { const mm = getModule(m.id); return mm && mm.ui && typeof mm.ui.handler === 'function' ? 'Configure' : 'Details'; })()} →</button></a>` : ''}
-      <form method=POST action="/modules/delete" onsubmit="return confirm('Delete the ${esc(m.name)} module? This removes its file, rules, and settings.')"><input type=hidden name=id value="${esc(m.id)}"><button class=bad>Delete</button></form>
+      <form method=POST action="/modules/delete" onsubmit="return confirm('Delete the ${esc(m.name)} automation? This removes its file, its schedule, and anything it stored.')"><input type=hidden name=id value="${esc(m.id)}"><button class=bad>Delete</button></form>
     </div>`).join('') : '<div class="card mut">No modules found in bridge/modules/.</div>';
   const upload = `<h2>Add a module</h2>
     <div class="card">
@@ -546,7 +546,7 @@ function modulesPage() {
       if (j.ok) setTimeout(()=>location.reload(), 15000);
     };
     </script>`;
-  return uiChrome('Modules', `<h2>Capability modules</h2><p class="mut">Each module adds artifacts, tools, and rules. Nothing is permitted until a module is enabled and a rule allows it.</p>${rows}${upload}`, '/modules');
+  return uiChrome('Modules', `<h2>Automations</h2><p class="mut">A module runs inside the bridge on a schedule, with no agent present \u2014 open some tabs, wait for you to sign in, capture what you need. It can only reach tabs you enabled under <a href="/tabs">Tabs</a>, and only the actions it declares. Agents write these for you; they don't call them.</p>${rows}${upload}`, '/modules');
 }
 
 

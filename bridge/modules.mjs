@@ -68,6 +68,15 @@ export async function loadModules() {
     delete owned[id]; dropped++;
   }
   if (dropped) { console.log(`[modules] released ${dropped} ownership claim(s) for removed module(s)`); save(); }
+
+  // Same for the enabled list. A module whose FILE is gone can never be enabled again
+  // by that entry, so leaving the id behind just makes the state file describe things
+  // that don't exist. `modulesSeen` is deliberately NOT pruned — remembering a module
+  // we've met is exactly what stops a re-added one from silently auto-enabling.
+  const before = (state.modulesEnabled || []).length;
+  state.modulesEnabled = (state.modulesEnabled || [])
+    .filter((id) => registry.has(id) || existsSync(join(MODULES_DIR, id + '.mjs')));
+  if (state.modulesEnabled.length !== before) save();
 }
 
 // --- Module-install approval queue ------------------------------------------
