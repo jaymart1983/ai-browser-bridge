@@ -37,7 +37,7 @@ import { configureModules, loadModules, setDestinationContents, refreshModuleDes
 import { uiRoutes } from './ui.mjs';
 import { getStatus as getUpdateStatus, checkForUpdate, applyUpdate, setAutoUpdate, startUpdateChecker, configureUpdater } from './updater.mjs';
 import { listClients, connectClient, disconnectClient } from './clients.mjs';
-import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations, moduleDashboardPath } from './modules.mjs';
+import { listTabActions, invokeTabAction, configureModuleApprovals, listModuleInstalls, listModules, allDestinations, moduleDashboardPath, agentInstallModule, moduleOwner, listModuleOwners } from './modules.mjs';
 import { state, save } from './state.mjs';
 
 const HOST = '127.0.0.1'; // loopback ONLY — do not change to 0.0.0.0
@@ -350,7 +350,7 @@ const server = http.createServer((req, res) => {
 
   // Bridge management for the extension popup (loopback only).
   if (req.method === 'GET' && url.pathname === '/bridge/status') {
-    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), pendingModules: listModuleInstalls(), stale: listStale(), browsers: listBrowsers(connectedBrowserIds()), activeBrowser: state.activeBrowser, agentConnected: agentConnected() });
+    return sendJson(res, 200, { pairing: pairingStatus(), agents: listAgents(), pending: listPending(), pendingModules: listModuleInstalls(), moduleOwners: listModuleOwners(), stale: listStale(), browsers: listBrowsers(connectedBrowserIds()), activeBrowser: state.activeBrowser, agentConnected: agentConnected() });
   }
   if (req.method === 'POST' && url.pathname === '/bridge/revoke') {
     return readJsonBody(req).then((b) => sendJson(res, 200, b.client_id ? revokeAgent(String(b.client_id)) : { ok: false, error: 'client_id required' }));
@@ -381,6 +381,21 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/bridge/update/config') {
     return readJsonBody(req).then((b) => sendJson(res, 200, setAutoUpdate(!!(b && b.autoUpdate))));
   }
+  // An agent shipping its own capability module. Authenticated with the agent's OAuth
+  // bearer — NOT the unauthenticated web-UI path — so the bridge knows WHICH agent is
+  // asking. First time for a module id: staged for human approval, and approving
+  // records that agent as its owner. After that the same agent may update that module
+  // unattended, so a host app can keep its module current without training the user to
+  // click through approvals. Revoking the agent's grant ends it.
+  if (req.method === 'POST' && url.pathname === '/bridge/module/install') {
+    const grant = validateToken(req.headers.authorization, req);
+    if (!grant) return sendJson(res, 401, { error: { code: 'UNAUTHORIZED', message: 'Agent bearer token required.' } }, { 'www-authenticate': wwwAuthenticate(req) });
+    return readJsonBody(req)
+      .then((b) => agentInstallModule({ id: b && b.id, code: b && b.code, client_id: grant.client_id, name: grant.name }))
+      .then((r) => sendJson(res, r.ok ? 200 : 400, r))
+      .catch((e) => sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }));
+  }
+
   // Connect AI agents: detect installed MCP clients and write/remove the bridge's
   // MCP entry into each one's own config (loopback + user-driven only).
   if (req.method === 'GET' && url.pathname === '/bridge/clients') {
@@ -421,13 +436,14 @@ const server = http.createServer((req, res) => {
   return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'Unknown path.' } });
 });
 
-function sendJson(res, status, obj) {
+function sendJson(res, status, obj, extraHeaders) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     // Explicitly no CORS headers — browsers cannot read cross-origin responses.
     'cache-control': 'no-store',
+    ...(extraHeaders || {}),
   });
   res.end(body);
 }

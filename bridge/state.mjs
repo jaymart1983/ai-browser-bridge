@@ -28,6 +28,7 @@ export const state = {
 
   // Capability platform (the rule engine + modules).
   modulesEnabled: [],  // [moduleId] — which capability modules are active
+  moduleOwners: {}, // moduleId -> { client_id, name, since } — who may update it unattended
   modulesSeen: [],     // [moduleId] — modules discovered at least once; gates one-time autoEnable so a manual disable sticks
   rules: [],           // ordered, top-down first-match: [{ id, action:'allow'|'deny', source, destination, permissions[], enabled, moduleId? }]
   destinations: [],    // user-created destination artifacts: [{ id, name, patterns[] }]
@@ -38,7 +39,7 @@ export function load() {
   try {
     if (existsSync(FILE)) {
       const d = JSON.parse(readFileSync(FILE, 'utf8'));
-      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts', 'browsers']) if (d[k]) state[k] = d[k];
+      for (const k of ['clients', 'grants', 'tokens', 'refresh', 'artifacts', 'browsers', 'moduleOwners']) if (d[k]) state[k] = d[k];
       for (const k of ['modulesEnabled', 'modulesSeen', 'rules', 'destinations']) if (Array.isArray(d[k])) state[k] = d[k];
       if ('pairing' in d) state.pairing = d.pairing;
       if ('activeBrowser' in d) state.activeBrowser = d.activeBrowser;

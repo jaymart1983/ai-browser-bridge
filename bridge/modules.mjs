@@ -4,7 +4,7 @@
 // destinations (so its rules can no longer match) while leaving user-authored
 // rules intact for re-enable. Deny-by-default: nothing is live until enabled.
 
-import { readdirSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -80,19 +80,24 @@ function pruneInstalls() {
   const cutoff = Date.now() - INSTALL_TTL_MS;
   for (const [k, p] of pendingInstalls) if (p.created < cutoff) pendingInstalls.delete(k);
 }
-export function requestModuleInstall(name, code) {
+export function requestModuleInstall(name, code, owner) {
   pruneInstalls();
   if (typeof code !== 'string' || !code.trim()) return { ok: false, error: 'code required' };
   if (code.length > 1_000_000) return { ok: false, error: 'module too large (1 MB max)' };
   if (pendingInstalls.size >= 10) return { ok: false, error: 'too many pending installs — approve or deny them first' };
   const reqId = 'mi_' + randomBytes(9).toString('base64url');
-  pendingInstalls.set(reqId, { reqId, name: String(name || 'module').slice(0, 80), code, created: Date.now() });
+  // `owner` is set when an AUTHENTICATED agent asked. Approving then records it as that
+  // module's owner, which is what lets the same agent ship later updates unattended.
+  pendingInstalls.set(reqId, { reqId, name: String(name || 'module').slice(0, 80), code, created: Date.now(), owner: owner || null });
   pingApprovals();
   return { ok: true, reqId };
 }
 export function listModuleInstalls() {
   pruneInstalls();
-  return [...pendingInstalls.values()].map((p) => ({ reqId: p.reqId, name: p.name, bytes: p.code.length, created: p.created }));
+  return [...pendingInstalls.values()].map((p) => ({
+    reqId: p.reqId, name: p.name, bytes: p.code.length, created: p.created,
+    requestedBy: p.owner ? p.owner.name : null,
+  }));
 }
 // Caller MUST have verified the decision signature (pairing.verifyDecision) first.
 export async function decideModuleInstall(reqId, approve) {
@@ -102,7 +107,59 @@ export async function decideModuleInstall(reqId, approve) {
   pingApprovals();
   if (!approve) return { ok: true, installed: false };
   const r = await uploadModule(p.name, p.code);
+  // Record ownership for every module this install introduced or replaced, so the
+  // agent that shipped it can keep it current without asking again.
+  if (p.owner && r.ok) for (const id of r.registered || []) claimModule(id, p.owner);
   return { ok: true, installed: true, ...r };
+}
+
+// --- Module ownership --------------------------------------------------------
+// Approving an agent's module is a standing decision: it says "this agent may run its
+// own code in the bridge". Re-asking on every version bump would train the user to
+// click through approvals, which is worse than the risk it pretends to manage. So the
+// approval is recorded, and afterwards THAT agent may update THAT module unattended.
+// Deliberately narrow: bound to the OAuth client_id (not a display name), to one module
+// id, and only while the agent's grant still exists — revoking the agent ends it.
+function owners() { state.moduleOwners = state.moduleOwners || {}; return state.moduleOwners; }
+function claimModule(id, owner) {
+  owners()[id] = { client_id: owner.client_id, name: owner.name, since: owners()[id]?.since || Date.now() };
+  save();
+}
+export function moduleOwner(id) { return owners()[id] || null; }
+export function listModuleOwners() { return { ...owners() }; }
+export function releaseModule(id) { if (owners()[id]) { delete owners()[id]; save(); } }
+
+// An agent shipping its own module. Returns {applied:true} when it owned the module
+// already, or {needsApproval:true, reqId} the first time.
+export async function agentInstallModule({ id, code, client_id, name }) {
+  if (typeof id !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(id)) return { ok: false, error: 'id must match [a-z0-9_-]{1,64}' };
+  if (typeof code !== 'string' || !code.trim()) return { ok: false, error: 'code required' };
+  if (code.length > 1_000_000) return { ok: false, error: 'module too large (1 MB max)' };
+
+  const own = moduleOwner(id);
+  const mine = own && own.client_id === client_id;
+  if (own && !mine) return { ok: false, error: `module "${id}" belongs to another agent (${own.name}) — it cannot be replaced from here` };
+  if (!own) {
+    // First time for this module: a human decides. Ownership is recorded on approval.
+    const r = requestModuleInstall(id, code, { client_id, name });
+    return r.ok ? { ok: true, needsApproval: true, reqId: r.reqId } : r;
+  }
+
+  // Owned by this agent → apply now. The file is named for the id so an update can
+  // never leave a second file claiming the same module.
+  const before = existsSync(join(MODULES_DIR, id + '.mjs')) ? readFileSync(join(MODULES_DIR, id + '.mjs'), 'utf8') : null;
+  const r = await uploadModule(id, code);
+  // The manifest is the authority on what a module IS, so verify the code actually
+  // registered as the id it claimed. Without this an agent could declare an id it owns
+  // and ship a manifest naming someone else's module, taking it over.
+  if (!(r.registered || []).includes(id)) {
+    if (before == null) { try { unlinkSync(join(MODULES_DIR, id + '.mjs')); } catch { /* nothing to undo */ } }
+    else writeFileSync(join(MODULES_DIR, id + '.mjs'), before);
+    await loadModules();
+    return { ok: false, error: `the uploaded code does not declare id "${id}" — reverted` };
+  }
+  console.log(`[modules] "${id}" updated by ${name} (owner) — no approval needed`);
+  return { ok: true, applied: true, id, file: r.file };
 }
 
 // Write a new/updated module file and reload. `code` is arbitrary JS that will
@@ -116,7 +173,10 @@ export async function uploadModule(name, code) {
   const before = new Set(registry.keys());
   await loadModules();
   const added = [...registry.keys()].filter((k) => !before.has(k));
-  return { ok: true, file: base + '.mjs', added };
+  // `registered` = ids this file declares NOW (added or replaced). `added` alone can't
+  // tell an update from a no-op, and ownership has to apply to both.
+  const registered = [...files.entries()].filter(([, f]) => f === join(MODULES_DIR, base + '.mjs')).map(([id]) => id);
+  return { ok: true, file: base + '.mjs', added, registered };
 }
 
 // Delete a module: disable, purge its rules/artifacts/destinations, remove file.
@@ -131,6 +191,7 @@ export async function deleteModule(id) {
   const file = files.get(id);
   if (file) { try { unlinkSync(file); } catch {} }
   registry.delete(id); files.delete(id);
+  releaseModule(id); // a deleted module is unowned again
   return { ok: true };
 }
 

@@ -4,7 +4,7 @@
 
 import { state, save } from './state.mjs';
 import { PERMISSIONS } from './rules.mjs';
-import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall } from './modules.mjs';
+import { listModules, setEnabled, getModule, allSources, allDestinations, allNavLinks, getModuleCtx, deleteModule, requestModuleInstall, decideModuleInstall, moduleOwner } from './modules.mjs';
 import { listAgents, listPending, listStale, revokeAgent, removeClient } from './oauth.mjs';
 import { pairingStatus, verifyDecision } from './pairing.mjs';
 import { refreshTrayMenu } from './tray.mjs';
@@ -389,7 +389,7 @@ function modulesPage() {
   const rows = mods.length ? mods.map((m) => `
     <div class="card row">
       <div style="flex:1"><b>${esc(m.name)}</b> <span class="tag ${m.enabled ? 'on' : 'off'}">${m.enabled ? 'ENABLED' : 'disabled'}</span>
-        <div class="mut" style="font-size:12px">${esc(m.description)}</div></div>
+        <div class="mut" style="font-size:12px">${esc(m.description)}</div>${(() => { const o = moduleOwner(m.id); return o ? `<div class="mut" style="font-size:11px;margin-top:3px">Updates automatically from <b>${esc(o.name)}</b> — revoke that agent to stop it</div>` : ''; })()}</div>
       <form method=POST action="/modules/toggle"><input type=hidden name=id value="${esc(m.id)}"><input type=hidden name=enabled value="${m.enabled ? '0' : '1'}">
         <button class="${m.enabled ? '' : 'primary'}">${m.enabled ? 'Disable' : 'Enable'}</button></form>
       ${m.enabled ? `<a href="/modules/${esc(m.id)}"><button>${(() => { const mm = getModule(m.id); return mm && mm.ui && typeof mm.ui.handler === 'function' ? 'Configure' : 'Details'; })()} →</button></a>` : ''}
