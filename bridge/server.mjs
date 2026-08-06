@@ -666,7 +666,7 @@ wss.on('connection', (ws) => {
         ws._browserId = bid;
         adoptLegacyForBrowser(bid, msg.browserName);
         touchBrowser(bid, msg.browserName);
-        setBrowserMeta(bid, msg.ua, msg.brands);
+        setBrowserMeta(bid, msg.ua, msg.brands, msg.version);
         agentSockets.set(bid, ws);
         // EMBEDDED MODE: the host ships and pins exactly one extension and removes the
         // UI that would otherwise select the active browser, so the browser that

@@ -218,7 +218,8 @@ function configPage() {
             +'<span style="width:9px;height:9px;border-radius:50%;display:inline-block;background:'+(b.connected?'var(--ok)':'var(--mut)')+'"></span>'
             +'<span class="grow"><b>'+esc(b.name)+'</b> '+(b.active?'<span class="tag on">active</span>':'')
             +(b.renamed?' <span class="tag" title="You named this browser. Reconnects will not overwrite it.">custom name</span>':'')
-            +' <span class="mut" style="font-size:11px">'+(b.connected?'connected':'offline')+'</span></span>'
+            +' <span class="mut" style="font-size:11px">'+(b.connected?'connected':'offline')
+            +(b.extVersion?' · extension v'+esc(b.extVersion):'')+'</span></span>'
             +(b.active?'':'<button data-use="'+esc(b.id)+'" class="primary">Use this browser</button>')
             +'<button data-ren="'+esc(b.id)+'" data-name="'+esc(b.name||'')+'">Rename</button>'
             +'<button data-unlink="'+esc(b.id)+'" class="bad">Unlink</button>'

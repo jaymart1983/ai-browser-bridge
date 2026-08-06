@@ -57,23 +57,28 @@ export function listBrowsers(connected = new Set()) {
       connected: connected.has(b.id), active: b.id === state.activeBrowser,
       // Descriptive signals so the user can tell look-alike Chromium browsers apart,
       // and see what the auto-name was derived from.
-      ua: b.ua || '', brands: b.brands || [],
+      ua: b.ua || '', brands: b.brands || [], extVersion: b.extVersion || '',
     }))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
 }
 
 // Record the browser's self-reported signals (from `hello`). Kept separate from the
 // name so refreshing them can never disturb a user's chosen label.
-export function setBrowserMeta(browserId, ua, brands) {
+export function setBrowserMeta(browserId, ua, brands, extVersion) {
   const b = state.browsers[browserId];
   if (!b) return false;
   const nextUa = typeof ua === 'string' ? ua.slice(0, 400) : '';
   const nextBrands = Array.isArray(brands)
     ? brands.slice(0, 12).map((x) => ({ brand: String((x && x.brand) || '').slice(0, 60), version: String((x && x.version) || '').slice(0, 20) })).filter((x) => x.brand)
     : [];
-  if (b.ua === nextUa && JSON.stringify(b.brands || []) === JSON.stringify(nextBrands)) return false;
+  // The extension announces its version on every hello. It was being dropped, so the
+  // control panel could not answer "which browser is running which build" — the exact
+  // question after reloading an unpacked extension, where nothing else confirms it took.
+  const nextVer = typeof extVersion === 'string' ? extVersion.slice(0, 32) : '';
+  if (b.ua === nextUa && b.extVersion === nextVer && JSON.stringify(b.brands || []) === JSON.stringify(nextBrands)) return false;
   if (nextUa) b.ua = nextUa;
   if (nextBrands.length) b.brands = nextBrands;
+  if (nextVer) b.extVersion = nextVer;
   save();
   return true;
 }
