@@ -93,6 +93,10 @@ label.chk{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-
 .tag.allow{background:#123a1e;color:#7fd39b}.tag.deny{background:#3a1518;color:#f0a0a4}
 @media (prefers-color-scheme: light){.tag.on{background:#dbeafe;color:#1e40af}.tag.off{background:#fef3c7;color:#92400e}.tag.allow{background:#dcfce7;color:#166534}.tag.deny{background:#fee2e2;color:#991b1b}}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}code{background:var(--inp);padding:1px 5px;border-radius:4px;font-size:12px}
+/* !important so it beats more specific element rules (button{...}) — a hidden element
+   must stay hidden regardless of what else styles it. Its absence is why the Config
+   page showed "Link this browser" to an already-linked browser. */
+.hidden{display:none !important}
 .modhead h1{font-size:18px;margin:0}
 .tabrow{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:14px 0 18px}
 .tabrow .tab{padding:8px 14px;color:var(--mut);text-decoration:none;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-1px}
